@@ -40,6 +40,8 @@ docs/ideas/
 *.csv
 *.db
 *.sqlite
+.codex
+
 
 .vscode/*
 !.vscode/settings.json

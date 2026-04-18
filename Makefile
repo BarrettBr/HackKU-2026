@@ -8,8 +8,10 @@ DEPS_STAMP ?= $(VENV_DIR)/.frontend-deps-stamp
 
 $(VENV_PYTHON):
 	$(PYTHON) -m venv $(VENV_DIR)
+	$(VENV_PYTHON) -m ensurepip --upgrade
 
 $(DEPS_STAMP): frontend/requirements.txt | $(VENV_PYTHON)
+	$(VENV_PYTHON) -m pip --version >/dev/null 2>&1 || (rm -rf $(VENV_DIR) && $(PYTHON) -m venv $(VENV_DIR) && $(VENV_PYTHON) -m ensurepip --upgrade)
 	$(VENV_PYTHON) -m pip install -r frontend/requirements.txt
 	touch $(DEPS_STAMP)
 
