@@ -17,6 +17,7 @@ type Registrar struct {
 }
 
 type Config struct {
+	os string
 	rtc_conf *webrtc.Configuration
 	Transmitter
 	Receiver
@@ -34,6 +35,7 @@ func Load() (*Config, error) {
 
 func loadSettings() (*Config, error) {
 	return &Config{
+		"Wayland",
 		&webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
 				{
