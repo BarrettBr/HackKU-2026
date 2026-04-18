@@ -2,11 +2,12 @@ package config
 
 import (
 	"log"
+
 	"github.com/pion/webrtc/v4"
 )
 
 type Transmitter struct {
-	Pixel_Width int
+	Pixel_Width  int
 	Pixel_Height int
 }
 
@@ -17,7 +18,7 @@ type Registrar struct {
 }
 
 type Config struct {
-	OS string
+	OS       string
 	Rtc_Conf *webrtc.Configuration
 	Transmitter
 	Receiver
@@ -44,8 +45,8 @@ func loadSettings() (*Config, error) {
 			},
 		},
 		Transmitter{
-			pixel_height: 600,
-			pixel_width: 600,
+			Pixel_Height: 600,
+			Pixel_Width:  600,
 		},
 		Receiver{},
 		Registrar{},
