@@ -1,7 +1,8 @@
 package config
 
-import(
+import (
 	"log"
+
 	"github.com/pion/webrtc/v4"
 )
 
@@ -9,17 +10,16 @@ type Config struct {
 	rtc_conf *webrtc.Configuration
 }
 
-
-func load() (*Config, error){
+func Load() (*Config, error) {
 	appCfg, err := loadSettings()
-	if(err != nil){
+	if err != nil {
 		log.Fatalf("Error building config: %v", err)
 	}
 
 	return appCfg, nil
 }
 
-func loadSettings() (*Config, error){
+func loadSettings() (*Config, error) {
 	return &Config{
 		&webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
@@ -28,6 +28,5 @@ func loadSettings() (*Config, error){
 				},
 			},
 		},
-
 	}, nil
 }

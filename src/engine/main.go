@@ -2,11 +2,12 @@ package main
 
 import (
 	"log"
-	"github.com/BarrettBr/eecs-582-capstone/internal/config"
+
+	"github.com/BarrettBr/HackKU-2026/config"
 )
 
-func main(){
-	appCfg, err := config.load();
+func main() {
+	appCfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Error building config: %v", err)
 	}
