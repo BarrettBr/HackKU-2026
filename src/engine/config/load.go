@@ -6,8 +6,8 @@ import (
 )
 
 type Transmitter struct {
-	pixel_height int
-	pixel_width int
+	Pixel_Width int
+	Pixel_Height int
 }
 
 type Receiver struct {
@@ -17,8 +17,8 @@ type Registrar struct {
 }
 
 type Config struct {
-	os string
-	rtc_conf *webrtc.Configuration
+	OS string
+	Rtc_Conf *webrtc.Configuration
 	Transmitter
 	Receiver
 	Registrar

@@ -11,5 +11,5 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error building config: %v", err)
 	}
-
+	_ = appCfg
 }
