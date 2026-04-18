@@ -4,6 +4,7 @@ import asyncio
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.api_client import ApiClient
+from app.services.movie_info_service import MovieInfo, MovieInfoService
 from app.services.room_service import (
     ChatMessage,
     JoinTarget,
@@ -51,9 +53,15 @@ class MainWindow(QMainWindow):
         self.state = state
         self.api_client = api_client
         self.ws_client = ws_client
+        self._movie_info_service = MovieInfoService(api_client)
         self.chat_open = True
         self.is_paused = False
         self._user_list_dialog: UserListDialog | None = None
+        self._movie_info_dialog: QDialog | None = None
+        self._movie_search_input: QLineEdit
+        self._movie_info_title: QLabel
+        self._movie_info_plot: QLabel
+        self._movie_info_cast: QLabel
         self._room_host = RoomHostService(display_name=self.state.display_name)
         self._room_client = RoomClient(display_name=self.state.display_name)
         self._room_target: JoinTarget | None = None
@@ -62,14 +70,14 @@ class MainWindow(QMainWindow):
         self._author_avatars: dict[str, str] = {}
         self._participant_buttons: list[QPushButton] = []
         self._palette = (
-            "#65E7C6",
-            "#C9BEFF",
-            "#FF9A6C",
-            "#8EC7FF",
-            "#E0BAD7",
             "#30BCED",
             "#6BF178",
             "#FC5130",
+            "#E0BAD7",
+            "#C9BEFF",
+            "#FF9A6C",
+            "#65E7C6",
+            "#8EC7FF",
         )
 
         self.setWindowTitle("Moovie Night")
@@ -90,7 +98,9 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._apply_styles()
-        self._install_mouse_tracking(self.centralWidget())
+        self._install_mouse_tracking(self._video_surface)
+        self._install_mouse_tracking(self._top_bar)
+        self._install_mouse_tracking(self._bottom_bar)
         self._show_landing()
 
     def _build_ui(self) -> None:
@@ -232,15 +242,25 @@ class MainWindow(QMainWindow):
         shell_layout.setContentsMargins(0, 0, 0, 0)
         shell_layout.setSpacing(0)
 
-        self._top_bar = self._build_top_bar()
-        shell_layout.addWidget(self._top_bar)
-
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setChildrenCollapsible(False)
         shell_layout.addWidget(self._splitter, 1)
 
+        video_column = QFrame()
+        video_column.setObjectName("videoColumn")
+        video_layout = QVBoxLayout(video_column)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_layout.setSpacing(0)
+
+        self._top_bar = self._build_top_bar()
+        video_layout.addWidget(self._top_bar)
+
         self._video_surface = self._build_video_surface()
-        self._splitter.addWidget(self._video_surface)
+        video_layout.addWidget(self._video_surface, 1)
+
+        self._bottom_bar = self._build_bottom_bar()
+        video_layout.addWidget(self._bottom_bar)
+        self._splitter.addWidget(video_column)
 
         self._chat_panel = ChatPanel()
         self._chat_panel.seed_messages()
@@ -248,10 +268,7 @@ class MainWindow(QMainWindow):
         self._chat_panel.file_sent.connect(self._handle_local_file)
         self._chat_panel.reaction_sent.connect(self._send_reaction)
         self._splitter.addWidget(self._chat_panel)
-        self._splitter.setSizes([930, 500])
-
-        self._bottom_bar = self._build_bottom_bar()
-        shell_layout.addWidget(self._bottom_bar)
+        self._splitter.setSizes([1000, 420])
         return shell
 
     def _build_top_bar(self) -> QFrame:
@@ -357,9 +374,15 @@ class MainWindow(QMainWindow):
         self._invite_link_field.setObjectName("inviteLinkField")
         self._invite_link_field.setReadOnly(True)
         self._invite_link_field.setPlaceholderText("Invite link appears here for hosts")
+        self._invite_link_field.hide()
         layout.addWidget(self._invite_link_field)
 
         layout.addStretch()
+
+        movie_info_button = QPushButton("IMDb")
+        movie_info_button.setObjectName("ghostButton")
+        movie_info_button.clicked.connect(self._show_movie_info_dialog)
+        layout.addWidget(movie_info_button)
 
         self._pause_button = QPushButton("⏸  Pause")
         self._pause_button.setObjectName("transportButton")
@@ -407,6 +430,7 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentWidget(self._room_shell)
         self._show_chrome()
         self._volume_controls.hide()
+        self._invite_link_field.hide()
         self._room_poll_timer.start()
 
     def _show_landing_options(self) -> None:
@@ -476,6 +500,7 @@ class MainWindow(QMainWindow):
         self._invite_link_field.setText(
             room.invite_link if is_host else room.compact_code
         )
+        self._invite_link_field.hide()
         self._last_message_id = 0
         self._chat_panel.clear_messages()
         self._refresh_participants(room.participants)
@@ -638,6 +663,7 @@ class MainWindow(QMainWindow):
     def _hide_chrome(self) -> None:
         if self._stack.currentWidget() is not self._room_shell:
             return
+        self._invite_link_field.hide()
         self._top_bar.hide()
         self._bottom_bar.hide()
 
@@ -645,7 +671,7 @@ class MainWindow(QMainWindow):
         self.chat_open = not self.chat_open
         self._chat_panel.setVisible(self.chat_open)
         if self.chat_open:
-            self._splitter.setSizes([930, 500])
+            self._splitter.setSizes([1000, 420])
         else:
             self._splitter.setSizes([1440, 0])
 
@@ -658,11 +684,102 @@ class MainWindow(QMainWindow):
         self._user_list_dialog.raise_()
         self._user_list_dialog.activateWindow()
 
+    def _show_movie_info_dialog(self) -> None:
+        if self._movie_info_dialog is None:
+            self._movie_info_dialog = self._build_movie_info_dialog()
+            self._movie_info_dialog.setStyleSheet(self.styleSheet())
+
+        self._movie_search_input.setText(self.state.movie_title)
+        self._movie_info_dialog.show()
+        self._movie_info_dialog.raise_()
+        self._movie_info_dialog.activateWindow()
+
+    def _build_movie_info_dialog(self) -> QDialog:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Movie Info")
+        dialog.setModal(False)
+        dialog.setMinimumWidth(460)
+        dialog.setObjectName("movieInfoDialog")
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("Movie lookup")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        self._movie_search_input = QLineEdit()
+        self._movie_search_input.setObjectName("movieSearchInput")
+        self._movie_search_input.setPlaceholderText("Search IMDb title...")
+        self._movie_search_input.returnPressed.connect(self._search_movie_info)
+        layout.addWidget(self._movie_search_input)
+
+        search_button = QPushButton("Search")
+        search_button.setObjectName("primaryButton")
+        search_button.clicked.connect(self._search_movie_info)
+        layout.addWidget(search_button)
+
+        self._movie_info_title = QLabel("No movie selected yet.")
+        self._movie_info_title.setObjectName("movieInfoTitle")
+        self._movie_info_title.setWordWrap(True)
+        layout.addWidget(self._movie_info_title)
+
+        self._movie_info_plot = QLabel(
+            "Backend endpoint expected: GET /movies/search?q=movie title"
+        )
+        self._movie_info_plot.setObjectName("movieInfoBody")
+        self._movie_info_plot.setWordWrap(True)
+        layout.addWidget(self._movie_info_plot)
+
+        self._movie_info_cast = QLabel("")
+        self._movie_info_cast.setObjectName("movieInfoBody")
+        self._movie_info_cast.setWordWrap(True)
+        layout.addWidget(self._movie_info_cast)
+
+        return dialog
+
+    def _search_movie_info(self) -> None:
+        query = self._movie_search_input.text().strip()
+        if not query:
+            return
+
+        self._movie_info_title.setText("Searching movie info...")
+        self._movie_info_plot.setText("")
+        self._movie_info_cast.setText("")
+        asyncio.create_task(self._search_movie_info_async(query))
+
+    async def _search_movie_info_async(self, query: str) -> None:
+        try:
+            movie = await self._movie_info_service.search(query)
+        except Exception as error:
+            self._movie_info_title.setText("Movie info endpoint is not connected yet.")
+            self._movie_info_plot.setText(
+                "Wire the backend to GET /movies/search?q=<title> and return "
+                "title/year/plot/actors/rating. "
+                f"Current error: {error}"
+            )
+            self._movie_info_cast.setText("")
+            return
+
+        self._apply_movie_info(movie)
+
+    def _apply_movie_info(self, movie: MovieInfo) -> None:
+        year_suffix = f" ({movie.year})" if movie.year else ""
+        rating_suffix = f" • IMDb {movie.rating}" if movie.rating else ""
+        self.state.movie_title = movie.title
+        self.state.movie_year = movie.year
+        self._movie_title_label.setText(f"{movie.title}{year_suffix}")
+        self._movie_info_title.setText(f"{movie.title}{year_suffix}{rating_suffix}")
+        self._movie_info_plot.setText(movie.plot)
+        self._movie_info_cast.setText(f"Cast: {movie.actors}")
+
     def _show_invite_hint(self) -> None:
         if not self.state.invite_link:
             self.statusBar().showMessage("Create a room before inviting people.", 2500)
             return
 
+        self._invite_link_field.show()
         self._invite_link_field.setFocus()
         self._invite_link_field.selectAll()
         self.statusBar().showMessage(
@@ -818,6 +935,9 @@ class MainWindow(QMainWindow):
                 background: #121224;
                 border-radius: 30px;
             }
+            QFrame#videoColumn {
+                background: #0a0914;
+            }
             QFrame#topBar,
             QFrame#bottomBar,
             QFrame#chatHeader,
@@ -850,12 +970,11 @@ class MainWindow(QMainWindow):
             QScrollArea#chatScrollArea,
             QScrollArea#chatScrollArea > QWidget,
             QWidget#chatFeed {
-                background: #e0bad7;
+                background: #17172c;
             }
             QFrame#chatBubble {
                 background: #232339;
                 border-radius: 18px;
-                border: 1px solid rgba(255, 255, 255, 0.03);
             }
             QFrame#chatBubble[selected="true"] {
                 border: 1px solid rgba(101, 231, 198, 0.85);
@@ -865,6 +984,11 @@ class MainWindow(QMainWindow):
                 border-radius: 14px;
             }
             QDialog#participantDialog {
+                background: #17172c;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 18px;
+            }
+            QDialog#movieInfoDialog {
                 background: #17172c;
                 border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 18px;
@@ -919,6 +1043,17 @@ class MainWindow(QMainWindow):
                 font-weight: 800;
                 color: #ffffff;
             }
+            QLabel#movieInfoTitle,
+            QLabel#sectionTitle {
+                color: #ffffff;
+                font-size: 20px;
+                font-weight: 800;
+            }
+            QLabel#movieInfoBody {
+                color: rgba(255, 255, 255, 0.72);
+                font-size: 14px;
+                font-weight: 600;
+            }
             QLabel#chatAuthor {
                 font-size: 17px;
                 font-weight: 700;
@@ -958,8 +1093,32 @@ class MainWindow(QMainWindow):
                 min-width: 20px;
                 min-height: 20px;
             }
+            QPushButton#bubbleReactionButton {
+                min-width: 34px;
+                max-width: 34px;
+                min-height: 34px;
+                max-height: 34px;
+                border-radius: 17px;
+                padding: 0px;
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+            }
             QPushButton#avatarChip {
                 font-family: "Apple Color Emoji", "Noto Color Emoji", "Segoe UI Emoji", "Twemoji Mozilla", sans-serif;
+            }
+            QMenu {
+                background: #232339;
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 12px;
+                padding: 8px;
+            }
+            QMenu::item {
+                padding: 8px 24px 8px 10px;
+                border-radius: 8px;
+            }
+            QMenu::item:selected {
+                background: rgba(255, 255, 255, 0.09);
             }
             QPushButton,
             QToolButton {
@@ -979,9 +1138,11 @@ class MainWindow(QMainWindow):
                 min-width: 108px;
             }
             QPushButton#ghostSmallButton {
-                min-width: 84px;
-                padding-left: 12px;
-                padding-right: 12px;
+                min-width: 42px;
+                max-width: 42px;
+                min-height: 42px;
+                max-height: 42px;
+                padding: 0px;
                 background: rgba(255, 255, 255, 0.04);
                 color: rgba(255, 255, 255, 0.66);
             }
@@ -1008,11 +1169,12 @@ class MainWindow(QMainWindow):
                 padding: 0px;
                 border: none;
             }
-            QPushButton#quickReactionButton {
-                min-width: 52px;
+            QToolButton#reactionMenuButton {
+                min-width: 112px;
                 min-height: 52px;
                 border-radius: 18px;
-                padding: 0px;
+                padding: 0px 14px;
+                text-align: left;
             }
             QPushButton#downloadButton {
                 background: rgba(255, 255, 255, 0.08);
@@ -1024,7 +1186,11 @@ class MainWindow(QMainWindow):
                 font-weight: 800;
             }
             QPushButton#primaryButton {
-                min-width: 120px;
+                min-width: 56px;
+                max-width: 70px;
+                min-height: 42px;
+                max-height: 42px;
+                padding: 0px;
                 background: rgba(255, 255, 255, 0.04);
                 color: rgba(255, 255, 255, 0.35);
             }
@@ -1046,13 +1212,31 @@ class MainWindow(QMainWindow):
                 font-size: 24px;
             }
             QLineEdit {
-                background: #e0bad7;
-                color: #1a1a1a;
+                background: #232339;
+                color: #ffffff;
                 border: none;
                 border-radius: 14px;
                 padding: 16px 18px;
                 font-size: 18px;
                 font-weight: 600;
+            }
+            QTextEdit#messageInput {
+                background: #232339;
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.07);
+                border-radius: 14px;
+                padding: 10px 14px;
+                font-size: 15px;
+                font-weight: 600;
+            }
+            QLineEdit#movieSearchInput {
+                background: #232339;
+                color: #ffffff;
+            }
+            QLineEdit#roomIdInput,
+            QLineEdit#roomNameInput {
+                background: #232339;
+                color: #ffffff;
             }
             QLineEdit#inviteLinkField {
                 background: rgba(255, 255, 255, 0.06);

@@ -5,16 +5,24 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QDragEnterEvent,
+    QDropEvent,
+    QIcon,
+    QKeyEvent,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -23,6 +31,7 @@ from app.services.room_service import ChatAttachment
 
 
 REACTION_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "reactions"
+ACTION_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "actions"
 
 REACTION_CHOICES: tuple[tuple[str, str, str], ...] = (
     ("🔥", "Fire", "fire.svg"),
@@ -44,6 +53,10 @@ def reaction_icon(reaction: str) -> QIcon:
     if icon_path is None:
         return QIcon()
     return QIcon(str(icon_path))
+
+
+def action_icon(name: str) -> QIcon:
+    return QIcon(str(ACTION_ICON_DIR / f"{name}.svg"))
 
 
 class ReactionPill(QFrame):
@@ -72,8 +85,35 @@ class ReactionPill(QFrame):
         return int(self._count_label.text())
 
 
+class ComposerInput(QTextEdit):
+    submitted = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("messageInput")
+        self.setPlaceholderText("Type a message...")
+        self.setAcceptRichText(False)
+        self.setMinimumHeight(46)
+        self.setMaximumHeight(118)
+        self.textChanged.connect(self._fit_to_text)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                super().keyPressEvent(event)
+                return
+            self.submitted.emit()
+            return
+        super().keyPressEvent(event)
+
+    def _fit_to_text(self) -> None:
+        doc_height = int(self.document().size().height()) + 20
+        self.setFixedHeight(min(max(46, doc_height), 118))
+
+
 class ChatBubble(QFrame):
     clicked = Signal(int)
+    reaction_requested = Signal(int, str)
 
     def __init__(
         self,
@@ -91,6 +131,7 @@ class ChatBubble(QFrame):
         self._reaction_pills: dict[str, ReactionPill] = {}
         self._reactions_row: QHBoxLayout | None = None
         self._selected = False
+        self._author_color = author_color
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(20, 16, 20, 16)
@@ -109,8 +150,18 @@ class ChatBubble(QFrame):
             host_badge.setObjectName("hostBadge")
             header.addWidget(host_badge)
 
+        self._reaction_button = QPushButton()
+        self._reaction_button.setObjectName("bubbleReactionButton")
+        self._reaction_button.setIcon(reaction_icon("🔥"))
+        self._reaction_button.setIconSize(QSize(20, 20))
+        self._reaction_button.setToolTip("React")
+        self._reaction_button.hide()
+        self._reaction_button.clicked.connect(self._show_reaction_menu)
+
         header.addStretch()
+        header.addWidget(self._reaction_button)
         self._layout.addLayout(header)
+        self._apply_border()
 
         message_label = QLabel(message)
         message_label.setObjectName("chatMessage")
@@ -128,6 +179,30 @@ class ChatBubble(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.message_id)
         super().mousePressEvent(event)
+
+    def enterEvent(self, event) -> None:  # type: ignore[override]
+        self._reaction_button.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        self._reaction_button.hide()
+        super().leaveEvent(event)
+
+    def _show_reaction_menu(self) -> None:
+        self.clicked.emit(self.message_id)
+        menu = QMenu(self)
+        for reaction, label, _icon in REACTION_CHOICES:
+            action = QAction(reaction_icon(reaction), label, menu)
+            action.triggered.connect(
+                lambda _checked=False, value=reaction: self.reaction_requested.emit(
+                    self.message_id,
+                    value,
+                )
+            )
+            menu.addAction(action)
+        menu.exec(
+            self._reaction_button.mapToGlobal(self._reaction_button.rect().bottomLeft())
+        )
 
     def _build_attachment_preview(self, attachment: ChatAttachment) -> QWidget:
         container = QFrame()
@@ -176,8 +251,13 @@ class ChatBubble(QFrame):
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
         self.setProperty("selected", selected)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        self._apply_border()
+
+    def _apply_border(self) -> None:
+        border_width = 2 if self._selected else 1
+        self.setStyleSheet(
+            f"QFrame#chatBubble {{ border: {border_width}px solid {self._author_color}; }}"
+        )
 
     def set_reactions(self, reactions: dict[str, int]) -> None:
         if self._reactions_row is None and reactions:
@@ -236,8 +316,8 @@ class ChatPanel(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("chatPanel")
-        self.setMinimumWidth(430)
-        self.setMaximumWidth(540)
+        self.setMinimumWidth(260)
+        self.setMaximumWidth(680)
         self.setAcceptDrops(True)
         self._message_cards: list[ChatBubble] = []
         self._message_cards_by_id: dict[int, ChatBubble] = {}
@@ -257,17 +337,6 @@ class ChatPanel(QFrame):
         title.setObjectName("chatTitle")
         header_layout.addWidget(title)
         header_layout.addStretch()
-
-        for reaction, label, _icon in REACTION_CHOICES:
-            button = QPushButton()
-            button.setObjectName("quickReactionButton")
-            button.setToolTip(label)
-            button.setIcon(reaction_icon(reaction))
-            button.setIconSize(QSize(28, 28))
-            button.clicked.connect(
-                lambda _checked=False, value=reaction: self._send_reaction(value)
-            )
-            header_layout.addWidget(button)
 
         layout.addWidget(header)
 
@@ -295,19 +364,24 @@ class ChatPanel(QFrame):
         composer_layout.setContentsMargins(24, 18, 24, 18)
         composer_layout.setSpacing(12)
 
-        self._message_input = QLineEdit()
-        self._message_input.setPlaceholderText("Type a message...")
-        self._message_input.returnPressed.connect(self._send_message)
+        self._message_input = ComposerInput()
+        self._message_input.submitted.connect(self._send_message)
         self._message_input.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
 
-        attach_button = QPushButton("Attach")
+        attach_button = QPushButton()
         attach_button.setObjectName("ghostSmallButton")
+        attach_button.setToolTip("Attach file")
+        attach_button.setIcon(action_icon("attach"))
+        attach_button.setIconSize(QSize(18, 18))
         attach_button.clicked.connect(self._choose_file)
 
-        send_button = QPushButton("Send")
+        send_button = QPushButton()
         send_button.setObjectName("primaryButton")
+        send_button.setToolTip("Send")
+        send_button.setIcon(action_icon("send"))
+        send_button.setIconSize(QSize(18, 18))
         send_button.clicked.connect(self._send_message)
 
         composer_layout.addWidget(self._message_input, 1)
@@ -383,6 +457,7 @@ class ChatPanel(QFrame):
             reactions=reactions,
         )
         bubble.clicked.connect(self.select_message)
+        bubble.reaction_requested.connect(self.reaction_sent.emit)
         self._message_cards.append(bubble)
         self._message_cards_by_id[message_id] = bubble
         self._messages_layout.insertWidget(self._messages_layout.count() - 1, bubble)
@@ -413,7 +488,7 @@ class ChatPanel(QFrame):
         self._selected_message_id = None
 
     def _send_message(self) -> None:
-        message = self._message_input.text().strip()
+        message = self._message_input.toPlainText().strip()
         if not message:
             return
 
