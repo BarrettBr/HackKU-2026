@@ -13,5 +13,12 @@ func main() {
 		log.Fatalf("Error building config: %v", err)
 	}
 
-	registry.New(appCfg)
+	appRegistry, err := registry.New(appCfg)
+	if err != nil {
+		log.Fatalf("Error creating registry: %v", err)
+	}
+
+	if err := appRegistry.Run(); err != nil {
+		log.Fatalf("Error running registry: %v", err)
+	}
 }
