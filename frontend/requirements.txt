@@ -1,0 +1,10 @@
+PySide6
+qasync
+httpx
+websockets
+pydantic
+python-dotenv
+pytest
+black
+isort
+mypy
