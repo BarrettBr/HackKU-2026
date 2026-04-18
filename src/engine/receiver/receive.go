@@ -6,25 +6,34 @@ import (
 	"io"
 	"strings"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	"github.com/BarrettBr/HackKU-2026/config"
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
+	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
 )
 
 // RTPPacket represents one inbound network packet.
 type RTPPacket struct {
-	Raw []byte
+	Packet *rtp.Packet
 }
 
 type Service struct {
 	stopOnce sync.Once
 	stopCh   chan struct{}
 
+	trackAttached atomic.Bool
+
 	sampleBuilder *samplebuilder.SampleBuilder
 	decoder       Decoder
+	inboundCh     chan inboundPacket
+}
+
+type inboundPacket struct {
+	packet *rtp.Packet
+	err    error
 }
 
 func New(cfg *config.Receiver) (*Service, error) {
@@ -51,23 +60,17 @@ func New(cfg *config.Receiver) (*Service, error) {
 		stopCh:        make(chan struct{}),
 		sampleBuilder: samplebuilder.New(64, depacketizer, 90000),
 		decoder:       decoder,
+		inboundCh:     make(chan inboundPacket, 256),
 	}, nil
 }
 
 func (s *Service) Run() error {
 	for {
-		select {
-		case <-s.stopCh:
-			return nil
-		default:
-		}
-
 		pkt, err := s.receivePacket()
 		if err != nil {
-			// No packet available yet. Keep receiver alive and polling.
-			if errors.Is(err, io.EOF) {
-				time.Sleep(5 * time.Millisecond)
-				continue
+			if errors.Is(err, io.EOF) || errors.Is(err, webrtc.ErrConnectionClosed) {
+				// Stream ended or service is shutting down.
+				return nil
 			}
 			return err
 		}
@@ -99,17 +102,23 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) receivePacket() (RTPPacket, error) {
-	// TODO: SRTP/RTP room transport read needs to be added.
-	return RTPPacket{}, io.EOF
+	select {
+	case <-s.stopCh:
+		return RTPPacket{}, io.EOF
+	case inbound := <-s.inboundCh:
+		if inbound.err != nil {
+			return RTPPacket{}, inbound.err
+		}
+		return RTPPacket{Packet: inbound.packet}, nil
+	}
 }
 
 func (s *Service) depacketize(pkt RTPPacket) (EncodedFrame, bool, error) {
-	var rtpPacket rtp.Packet
-	if err := rtpPacket.Unmarshal(pkt.Raw); err != nil {
-		return EncodedFrame{}, false, err
+	if pkt.Packet == nil {
+		return EncodedFrame{}, false, fmt.Errorf("nil RTP packet")
 	}
 
-	s.sampleBuilder.Push(&rtpPacket)
+	s.sampleBuilder.Push(pkt.Packet)
 	sample := s.sampleBuilder.Pop()
 	if sample == nil {
 		return EncodedFrame{}, false, nil
@@ -137,5 +146,41 @@ func newDepacketizer(codec string) (rtp.Depacketizer, error) {
 		return &codecs.VP9Packet{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported receiver codec: %s", codec)
+	}
+}
+
+// AttachWatcherTrack binds the receiver to a watcher RTP track.
+// Pion handles DTLS/SRTP and this service consumes plain RTP packets.
+func (s *Service) AttachWatcherTrack(track *webrtc.TrackRemote) error {
+	if track == nil {
+		return fmt.Errorf("track is nil")
+	}
+
+	if !s.trackAttached.CompareAndSwap(false, true) {
+		return fmt.Errorf("watcher track already attached")
+	}
+
+	go s.readTrackLoop(track)
+	return nil
+}
+
+func (s *Service) readTrackLoop(track *webrtc.TrackRemote) {
+	for {
+		packet, _, err := track.ReadRTP()
+		if err != nil {
+			select {
+			case <-s.stopCh:
+				return
+			case s.inboundCh <- inboundPacket{err: err}:
+			default:
+			}
+			return
+		}
+
+		select {
+		case <-s.stopCh:
+			return
+		case s.inboundCh <- inboundPacket{packet: packet}:
+		}
 	}
 }
