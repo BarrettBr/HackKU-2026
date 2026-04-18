@@ -2,9 +2,11 @@ package config
 
 import(
 	"log"
+	"github.com/pion/webrtc/v4"
 )
 
 type Config struct {
+	rtc_conf *webrtc.Configuration
 }
 
 
@@ -19,5 +21,13 @@ func load() (*Config, error){
 
 func loadSettings() (*Config, error){
 	return &Config{
+		&webrtc.Configuration{
+			ICEServers: []webrtc.ICEServer{
+				{
+					URLs: []string{"stun:stun.l.google.com:19302"},
+				},
+			},
+		},
+
 	}, nil
 }
