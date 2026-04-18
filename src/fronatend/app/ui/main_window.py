@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.api_client import ApiClient
+from app.services.room_service import RoomClient, RoomHostService, RoomInfo
 from app.services.ws_client import WsClient
 from app.state.app_state import AppState
 from app.ui.chat_panel import ChatPanel
@@ -44,6 +47,8 @@ class MainWindow(QMainWindow):
         self.chat_open = True
         self.is_paused = False
         self._user_list_dialog: UserListDialog | None = None
+        self._room_host = RoomHostService(display_name=self.state.display_name)
+        self._room_client = RoomClient(display_name=self.state.display_name)
 
         self.setWindowTitle("Moovie Night")
         self.setMinimumSize(1260, 800)
@@ -105,7 +110,7 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(title)
 
         subtitle = QLabel(
-            "Create a room to host a stream, or join an existing room with an ID."
+            "Create a room to host a stream, or join with a P2P invite link."
         )
         subtitle.setWordWrap(True)
         subtitle.setObjectName("landingSubtitle")
@@ -164,7 +169,7 @@ class MainWindow(QMainWindow):
 
         self._room_id_input = QLineEdit()
         self._room_id_input.setObjectName("roomIdInput")
-        self._room_id_input.setPlaceholderText("Enter room ID")
+        self._room_id_input.setPlaceholderText("Paste invite link or ROOM@host:port")
         self._room_id_input.returnPressed.connect(self._join_room)
         join_layout.addWidget(self._room_id_input)
 
@@ -183,6 +188,11 @@ class MainWindow(QMainWindow):
         join_actions.addWidget(back_from_join)
         join_layout.addLayout(join_actions)
         self._landing_flow.addWidget(join_form)
+
+        self._landing_status = QLabel("No room connection yet.")
+        self._landing_status.setObjectName("landingStatus")
+        self._landing_status.setWordWrap(True)
+        card_layout.addWidget(self._landing_status)
 
         card_layout.addWidget(self._landing_flow)
 
@@ -322,7 +332,17 @@ class MainWindow(QMainWindow):
         self._viewer_label = QLabel(f"{len(self.state.participants)} viewers")
         self._viewer_label.setObjectName("viewerLabel")
         info_col.addWidget(self._viewer_label)
+
+        self._connection_label = QLabel(self.state.connection_status)
+        self._connection_label.setObjectName("connectionLabel")
+        info_col.addWidget(self._connection_label)
         layout.addLayout(info_col)
+
+        self._invite_link_field = QLineEdit()
+        self._invite_link_field.setObjectName("inviteLinkField")
+        self._invite_link_field.setReadOnly(True)
+        self._invite_link_field.setPlaceholderText("Invite link appears here for hosts")
+        layout.addWidget(self._invite_link_field)
 
         layout.addStretch()
 
@@ -378,23 +398,66 @@ class MainWindow(QMainWindow):
 
     def _show_create_flow(self) -> None:
         self._landing_flow.setCurrentIndex(1)
+        self._landing_status.setText("Name the room, then start the host listener.")
         self._room_name_input.setFocus()
 
     def _show_join_flow(self) -> None:
         self._landing_flow.setCurrentIndex(2)
+        self._landing_status.setText("Paste a P2P invite link from the host.")
         self._room_id_input.setFocus()
 
     def _create_room(self) -> None:
-        room_name = self._room_name_input.text().strip() or "Friday Movie Room"
-        self.state.room_name = room_name
-        self._room_name_label.setText(room_name)
-        self._show_room()
+        asyncio.create_task(self._create_room_async())
 
     def _join_room(self) -> None:
-        room_id = self._room_id_input.text().strip() or "Room ABC123"
-        self.state.room_name = room_id
-        self._room_name_label.setText(room_id)
+        asyncio.create_task(self._join_room_async())
+
+    async def _create_room_async(self) -> None:
+        room_name = self._room_name_input.text().strip() or "Friday Movie Room"
+        self._landing_status.setText("Creating room and opening P2P join listener...")
+        try:
+            room = await self._room_host.start_room(room_name)
+        except OSError as error:
+            self._landing_status.setText(f"Could not start room: {error}")
+            return
+
+        self._apply_room_info(room=room, is_host=True)
+        self._landing_status.setText(
+            f"Room created. Share this code: {room.compact_code}"
+        )
         self._show_room()
+
+    async def _join_room_async(self) -> None:
+        invite = self._room_id_input.text().strip()
+        self._landing_status.setText("Connecting to host...")
+        try:
+            room = await self._room_client.join(invite)
+        except Exception as error:
+            self._landing_status.setText(f"Could not join room: {error}")
+            return
+
+        self._apply_room_info(room=room, is_host=False)
+        self._landing_status.setText(f"Connected to {room.room_name}.")
+        self._show_room()
+
+    def _apply_room_info(self, room: RoomInfo, is_host: bool) -> None:
+        self.state.room_id = room.room_id
+        self.state.room_name = room.room_name
+        self.state.invite_link = room.invite_link
+        self.state.compact_room_code = room.compact_code
+        self.state.is_host = is_host
+        self.state.connection_status = (
+            f"Hosting {room.compact_code}" if is_host else f"Joined {room.room_id}"
+        )
+        self.state.participants = room.participants
+
+        self._room_name_label.setText(room.room_name)
+        self._watching_label.setText(f"{len(room.participants)} watching")
+        self._viewer_label.setText(f"{len(room.participants)} viewers")
+        self._connection_label.setText(self.state.connection_status)
+        self._invite_link_field.setText(
+            room.invite_link if is_host else room.compact_code
+        )
 
     def _toggle_volume_controls(self) -> None:
         self._volume_controls.setVisible(not self._volume_controls.isVisible())
@@ -450,11 +513,19 @@ class MainWindow(QMainWindow):
         self._user_list_dialog.activateWindow()
 
     def _show_invite_hint(self) -> None:
+        if not self.state.invite_link:
+            self.statusBar().showMessage("Create a room before inviting people.", 2500)
+            return
+
+        self._invite_link_field.setFocus()
+        self._invite_link_field.selectAll()
         self.statusBar().showMessage(
-            "Invite flow placeholder: copy room code later.", 2500
+            f"Invite link selected. Code: {self.state.compact_room_code}", 5000
         )
 
     def _leave_room(self) -> None:
+        if self.state.is_host:
+            asyncio.create_task(self._room_host.stop())
         self._show_landing()
         self.statusBar().showMessage("Left the room.", 2000)
 
@@ -520,6 +591,12 @@ class MainWindow(QMainWindow):
             QLabel#landingSubtitle {
                 color: rgba(255, 255, 255, 0.72);
                 font-size: 16px;
+            }
+            QLabel#landingStatus {
+                color: #e0bad7;
+                font-size: 14px;
+                font-weight: 600;
+                min-height: 36px;
             }
             QLineEdit#roomIdInput,
             QLineEdit#roomNameInput {
@@ -621,7 +698,8 @@ class MainWindow(QMainWindow):
             QLabel#watchingLabel,
             QLabel#viewerLabel,
             QLabel#videoStatus,
-            QLabel#volumeLabel {
+            QLabel#volumeLabel,
+            QLabel#connectionLabel {
                 color: rgba(255, 255, 255, 0.62);
                 font-size: 13px;
                 font-weight: 600;
@@ -750,6 +828,15 @@ class MainWindow(QMainWindow):
                 padding: 16px 18px;
                 font-size: 18px;
                 font-weight: 600;
+            }
+            QLineEdit#inviteLinkField {
+                background: rgba(255, 255, 255, 0.06);
+                color: rgba(255, 255, 255, 0.76);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                min-width: 360px;
+                max-width: 460px;
+                font-size: 12px;
+                padding: 10px 12px;
             }
             QSlider#volumeSlider {
                 min-width: 140px;

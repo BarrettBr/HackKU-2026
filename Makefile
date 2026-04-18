@@ -34,7 +34,7 @@ typecheck: deps
 	$(VENV_PYTHON) -m mypy --no-incremental src/fronatend/app
 
 test: deps
-	$(VENV_PYTHON) -m pytest
+	PYTHONPATH=src/fronatend $(VENV_PYTHON) -m pytest
 
 clean:
 	rm -rf $(VENV_DIR)

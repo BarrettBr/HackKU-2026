@@ -9,6 +9,11 @@ class AppState:
     display_name: str = "Local User"
     movie_title: str = "Movie Title"
     movie_year: str = "2024"
+    room_id: str = ""
+    invite_link: str = ""
+    compact_room_code: str = ""
+    is_host: bool = False
+    connection_status: str = "Not connected"
     participants: list[str] = field(
         default_factory=lambda: ["User1 (Host)", "User2", "User3", "User4"]
     )
