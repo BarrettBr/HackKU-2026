@@ -9,6 +9,7 @@ class UserListDialog(QDialog):
         self.setWindowTitle("Participants")
         self.setModal(False)
         self.setMinimumWidth(280)
+        self.setObjectName("participantDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -19,5 +20,6 @@ class UserListDialog(QDialog):
         layout.addWidget(title)
 
         users = QListWidget()
+        users.setObjectName("participantList")
         users.addItems(participants)
         layout.addWidget(users)

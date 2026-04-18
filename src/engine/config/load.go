@@ -7,8 +7,10 @@ import (
 )
 
 type Transmitter struct {
-	Pixel_Width  int
-	Pixel_Height int
+	PixelWidth  int
+	PixelHeight int
+	FrameRate int
+	StreamName string
 }
 
 type Receiver struct {
@@ -45,8 +47,10 @@ func loadSettings() (*Config, error) {
 			},
 		},
 		Transmitter{
-			Pixel_Height: 600,
-			Pixel_Width:  600,
+			PixelWidth:  600,
+			PixelHeight: 600,
+			FrameRate: 30,
+			StreamName: "screen-capture",
 		},
 		Receiver{},
 		Registrar{},
