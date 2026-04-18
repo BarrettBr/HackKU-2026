@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
@@ -20,7 +21,14 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.api_client import ApiClient
-from app.services.room_service import RoomClient, RoomHostService, RoomInfo
+from app.services.room_service import (
+    ChatMessage,
+    JoinTarget,
+    RoomClient,
+    RoomHostService,
+    RoomInfo,
+    parse_join_target,
+)
 from app.services.ws_client import WsClient
 from app.state.app_state import AppState
 from app.ui.chat_panel import ChatPanel
@@ -49,6 +57,22 @@ class MainWindow(QMainWindow):
         self._user_list_dialog: UserListDialog | None = None
         self._room_host = RoomHostService(display_name=self.state.display_name)
         self._room_client = RoomClient(display_name=self.state.display_name)
+        self._room_target: JoinTarget | None = None
+        self._last_message_id = 0
+        self._author_colors: dict[str, str] = {}
+        self._author_avatars: dict[str, str] = {}
+        self._participant_buttons: list[QPushButton] = []
+        self._palette = (
+            "#65E7C6",
+            "#C9BEFF",
+            "#FF9A6C",
+            "#8EC7FF",
+            "#E0BAD7",
+            "#30BCED",
+            "#6BF178",
+            "#FC5130",
+        )
+        self._avatar_choices = ("🦊", "🐸", "🐧", "🦝", "🐙", "🦉", "🐯", "🐳")
 
         self.setWindowTitle("Moovie Night")
         self.setMinimumSize(1260, 800)
@@ -62,6 +86,9 @@ class MainWindow(QMainWindow):
         self._chrome_timer = QTimer(self)
         self._chrome_timer.setInterval(1800)
         self._chrome_timer.timeout.connect(self._hide_chrome)
+        self._room_poll_timer = QTimer(self)
+        self._room_poll_timer.setInterval(900)
+        self._room_poll_timer.timeout.connect(self._poll_room)
 
         self._build_ui()
         self._apply_styles()
@@ -248,20 +275,9 @@ class MainWindow(QMainWindow):
 
         avatars = QFrame()
         avatars.setObjectName("avatarRow")
-        avatars_layout = QHBoxLayout(avatars)
-        avatars_layout.setContentsMargins(0, 0, 0, 0)
-        avatars_layout.setSpacing(-8)
-
-        avatar_colors = ("#6657E5", "#1E9F86", "#C8682B", "#BA4D7F")
-        for text, name, color in zip(
-            ("U1", "U2", "U3", "U4"), self.state.participants, avatar_colors
-        ):
-            avatar = QPushButton(text)
-            avatar.setObjectName("avatarChip")
-            avatar.setToolTip(name)
-            avatar.setStyleSheet(f"background: {color}; color: white;")
-            avatar.clicked.connect(self._show_participants)
-            avatars_layout.addWidget(avatar)
+        self._avatars_layout = QHBoxLayout(avatars)
+        self._avatars_layout.setContentsMargins(0, 0, 0, 0)
+        self._avatars_layout.setSpacing(-8)
 
         layout.addWidget(avatars)
 
@@ -392,6 +408,7 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentWidget(self._room_shell)
         self._show_chrome()
         self._volume_controls.hide()
+        self._room_poll_timer.start()
 
     def _show_landing_options(self) -> None:
         self._landing_flow.setCurrentIndex(0)
@@ -422,6 +439,7 @@ class MainWindow(QMainWindow):
             return
 
         self._apply_room_info(room=room, is_host=True)
+        self._room_target = parse_join_target(room.invite_link)
         self._landing_status.setText(
             f"Room created. Share this code: {room.compact_code}"
         )
@@ -431,12 +449,14 @@ class MainWindow(QMainWindow):
         invite = self._room_id_input.text().strip()
         self._landing_status.setText("Connecting to host...")
         try:
+            target = parse_join_target(invite)
             room = await self._room_client.join(invite)
         except Exception as error:
             self._landing_status.setText(f"Could not join room: {error}")
             return
 
         self._apply_room_info(room=room, is_host=False)
+        self._room_target = target
         self._landing_status.setText(f"Connected to {room.room_name}.")
         self._show_room()
 
@@ -452,21 +472,93 @@ class MainWindow(QMainWindow):
         self.state.participants = room.participants
 
         self._room_name_label.setText(room.room_name)
-        self._watching_label.setText(f"{len(room.participants)} watching")
-        self._viewer_label.setText(f"{len(room.participants)} viewers")
         self._connection_label.setText(self.state.connection_status)
         self._invite_link_field.setText(
             room.invite_link if is_host else room.compact_code
         )
+        self._last_message_id = 0
+        self._chat_panel.clear_messages()
+        self._refresh_participants(room.participants)
+
+    def _refresh_participants(self, participants: list[str]) -> None:
+        self.state.participants = participants
+        self._watching_label.setText(f"{len(participants)} watching")
+        self._viewer_label.setText(f"{len(participants)} viewers")
+
+        while self._avatars_layout.count():
+            item = self._avatars_layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self._participant_buttons.clear()
+        for participant in participants[:6]:
+            avatar = QPushButton(self._avatar_for_participant(participant))
+            avatar.setObjectName("avatarChip")
+            avatar.setToolTip(participant)
+            avatar.setStyleSheet(
+                f"background: {self._color_for_author(participant)}; color: white;"
+            )
+            avatar.clicked.connect(self._show_participants)
+            self._avatars_layout.addWidget(avatar)
+            self._participant_buttons.append(avatar)
 
     def _toggle_volume_controls(self) -> None:
         self._volume_controls.setVisible(not self._volume_controls.isVisible())
 
     def _handle_local_message(self, message: str) -> None:
-        self._chat_panel.add_message("You", message, author_color="#E0BAD7")
+        if self._room_target is None:
+            self.statusBar().showMessage("Join or create a room before chatting.", 2500)
+            return
+        asyncio.create_task(self._send_chat_message_async(self._room_target, message))
 
     def _send_reaction(self, emoji: str) -> None:
         self._chat_panel.add_reaction_to_latest_message(emoji)
+
+    async def _send_chat_message_async(self, target: JoinTarget, message: str) -> None:
+        try:
+            chat_message = await self._room_client.send_message(target, message)
+        except Exception as error:
+            self.statusBar().showMessage(f"Message failed: {error}", 3000)
+            return
+        self._append_chat_message(chat_message)
+
+    def _poll_room(self) -> None:
+        if self._stack.currentWidget() is not self._room_shell:
+            return
+        if self._room_target is None:
+            return
+        asyncio.create_task(self._poll_room_async(self._room_target))
+
+    async def _poll_room_async(self, target: JoinTarget) -> None:
+        try:
+            room, messages = await self._room_client.fetch_messages(
+                target=target,
+                after=self._last_message_id,
+            )
+        except Exception:
+            if not self.state.is_host:
+                self._room_poll_timer.stop()
+                self._show_landing()
+                self._landing_status.setText("The host ended the room.")
+            return
+
+        self._refresh_participants(room.participants)
+        for message in messages:
+            self._append_chat_message(message)
+
+    def _append_chat_message(self, message: ChatMessage) -> None:
+        if message.id <= self._last_message_id:
+            return
+        self._last_message_id = message.id
+        self._chat_panel.add_message(
+            author=message.author,
+            message=message.text,
+            author_color=self._color_for_author(message.author),
+            is_host=message.author == self._host_name(),
+        )
 
     def _toggle_pause(self) -> None:
         self.is_paused = not self.is_paused
@@ -526,8 +618,41 @@ class MainWindow(QMainWindow):
     def _leave_room(self) -> None:
         if self.state.is_host:
             asyncio.create_task(self._room_host.stop())
+        elif self._room_target is not None:
+            asyncio.create_task(self._leave_room_async(self._room_target))
+        self._room_poll_timer.stop()
+        self._room_target = None
         self._show_landing()
         self.statusBar().showMessage("Left the room.", 2000)
+
+    async def _leave_room_async(self, target: JoinTarget) -> None:
+        try:
+            await self._room_client.leave(target)
+        except Exception:
+            # Leaving should never trap someone in the local UI.
+            pass
+
+    def _host_name(self) -> str:
+        return self.state.participants[0] if self.state.participants else ""
+
+    def _color_for_author(self, author: str) -> str:
+        color = self._author_colors.get(author)
+        if color is not None:
+            return color
+
+        color = self._palette[len(self._author_colors) % len(self._palette)]
+        self._author_colors[author] = color
+        return color
+
+    def _avatar_for_participant(self, participant: str) -> str:
+        avatar = self._author_avatars.get(participant)
+        if avatar is not None:
+            return avatar
+
+        digest = hashlib.sha256(participant.encode("utf-8")).digest()
+        avatar = self._avatar_choices[digest[0] % len(self._avatar_choices)]
+        self._author_avatars[participant] = avatar
+        return avatar
 
     def _install_mouse_tracking(self, widget: QObject | None) -> None:
         if widget is None:

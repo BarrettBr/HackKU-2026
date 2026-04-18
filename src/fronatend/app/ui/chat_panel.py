@@ -235,6 +235,16 @@ class ChatPanel(QFrame):
         self._message_cards[-1].add_reaction(emoji)
         self._scroll_to_bottom()
 
+    def clear_messages(self) -> None:
+        while self._messages_layout.count() > 1:
+            item = self._messages_layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._message_cards.clear()
+
     def _send_message(self) -> None:
         message = self._message_input.text().strip()
         if not message:
