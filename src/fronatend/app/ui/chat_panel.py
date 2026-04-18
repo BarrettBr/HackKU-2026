@@ -15,9 +15,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFileDialog,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QPushButton,
     QScrollArea,
@@ -46,6 +48,24 @@ REACTION_LABELS = {reaction: label for reaction, label, _icon in REACTION_CHOICE
 REACTION_ICONS = {
     reaction: REACTION_ICON_DIR / icon for reaction, _label, icon in REACTION_CHOICES
 }
+
+GIF_LIBRARY: tuple[ChatAttachment, ...] = (
+    ChatAttachment(
+        filename="popcorn.gif",
+        mime_type="image/gif",
+        data_base64="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+    ),
+    ChatAttachment(
+        filename="movie-night.gif",
+        mime_type="image/gif",
+        data_base64="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+    ),
+    ChatAttachment(
+        filename="standing-ovation.gif",
+        mime_type="image/gif",
+        data_base64="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+    ),
+)
 
 
 def reaction_icon(reaction: str) -> QIcon:
@@ -154,10 +174,9 @@ class ChatBubble(QFrame):
 
         self._reaction_button = QPushButton()
         self._reaction_button.setObjectName("bubbleReactionButton")
-        self._reaction_button.setIcon(reaction_icon("🔥"))
         self._reaction_button.setIconSize(QSize(20, 20))
         self._reaction_button.setToolTip("React")
-        self._reaction_button.hide()
+        self._reaction_button.setIcon(QIcon())
         self._reaction_button.clicked.connect(self._show_reaction_menu)
 
         header.addStretch()
@@ -183,11 +202,11 @@ class ChatBubble(QFrame):
         super().mousePressEvent(event)
 
     def enterEvent(self, event) -> None:  # type: ignore[override]
-        self._reaction_button.show()
+        self._reaction_button.setIcon(reaction_icon("🔥"))
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # type: ignore[override]
-        self._reaction_button.hide()
+        self._reaction_button.setIcon(QIcon())
         super().leaveEvent(event)
 
     def _show_reaction_menu(self) -> None:
@@ -218,7 +237,7 @@ class ChatBubble(QFrame):
         title.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(title)
 
-        if attachment.mime_type in {"image/png", "image/jpeg"}:
+        if attachment.mime_type in {"image/png", "image/jpeg", "image/gif"}:
             pixmap = QPixmap()
             if pixmap.loadFromData(base64.b64decode(attachment.data_base64)):
                 preview = QLabel()
@@ -314,6 +333,7 @@ class ChatPanel(QFrame):
     message_sent = Signal(str)
     reaction_sent = Signal(int, str)
     file_sent = Signal(str)
+    gif_sent = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -377,7 +397,7 @@ class ChatPanel(QFrame):
         attach_button.setToolTip("Attach file")
         attach_button.setIcon(action_icon("attach"))
         attach_button.setIconSize(QSize(18, 18))
-        attach_button.clicked.connect(self._choose_file)
+        attach_button.clicked.connect(lambda: self._show_attach_menu(attach_button))
 
         send_button = QPushButton()
         send_button.setObjectName("primaryButton")
@@ -507,6 +527,23 @@ class ChatPanel(QFrame):
         if file_path:
             self.file_sent.emit(file_path)
 
+    def _show_attach_menu(self, button: QPushButton) -> None:
+        menu = QMenu(self)
+        attach_action = QAction(action_icon("attach"), "Attach file", menu)
+        attach_action.triggered.connect(self._choose_file)
+        menu.addAction(attach_action)
+
+        gif_action = QAction("GIF library", menu)
+        gif_action.triggered.connect(self._show_gif_library)
+        menu.addAction(gif_action)
+
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _show_gif_library(self) -> None:
+        dialog = GifLibraryDialog(self)
+        dialog.gif_selected.connect(self.gif_sent.emit)
+        dialog.exec()
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -524,3 +561,57 @@ class ChatPanel(QFrame):
     def _scroll_to_bottom(self) -> None:
         bar = self._scroll_area.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+
+class GifLibraryDialog(QDialog):
+    gif_selected = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("GIF Library")
+        self.setObjectName("gifLibraryDialog")
+        self.setMinimumWidth(320)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Choose a GIF")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Search built-in GIFs...")
+        self._search_input.textChanged.connect(self._refresh_results)
+        layout.addWidget(self._search_input)
+
+        self._results = QVBoxLayout()
+        self._results.setSpacing(8)
+        layout.addLayout(self._results)
+        self._refresh_results()
+
+    def _refresh_results(self) -> None:
+        while self._results.count():
+            item = self._results.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        query = self._search_input.text().strip().lower()
+        for attachment in GIF_LIBRARY:
+            label = attachment.filename.replace("-", " ").replace(".gif", "")
+            if query and query not in label.lower():
+                continue
+
+            button = QPushButton(label.title())
+            button.setObjectName("gifChoiceButton")
+            button.clicked.connect(
+                lambda _checked=False, value=attachment: self._select_gif(value)
+            )
+            self._results.addWidget(button)
+
+    def _select_gif(self, attachment: ChatAttachment) -> None:
+        self.gif_selected.emit(attachment)
+        self.accept()

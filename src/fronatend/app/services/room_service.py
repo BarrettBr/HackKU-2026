@@ -38,6 +38,16 @@ class RoomInfo:
     compact_code: str
     participants: list[str] = field(default_factory=list)
     is_paused: bool = False
+    movie: RoomMovieInfo | None = None
+
+
+@dataclass(frozen=True)
+class RoomMovieInfo:
+    title: str
+    year: str = ""
+    plot: str = ""
+    actors: str = ""
+    rating: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,7 @@ class RoomHostService:
         self._messages: list[ChatMessage] = []
         self._next_message_id = 1
         self._is_paused = False
+        self._movie: RoomMovieInfo | None = None
 
     async def start_room(self, room_name: str) -> RoomInfo:
         await self.stop()
@@ -105,6 +116,7 @@ class RoomHostService:
         self._messages = []
         self._next_message_id = 1
         self._is_paused = False
+        self._movie = None
         return self.room
 
     async def stop(self) -> None:
@@ -116,6 +128,7 @@ class RoomHostService:
         self._messages = []
         self._next_message_id = 1
         self._is_paused = False
+        self._movie = None
 
     async def _handle_client(
         self,
@@ -158,6 +171,8 @@ class RoomHostService:
             status, payload = self._handle_post_reaction(body)
         elif method == "POST" and path == "/playback":
             status, payload = self._handle_playback(body)
+        elif method == "POST" and path == "/movie":
+            status, payload = self._handle_movie(body)
         elif method == "GET" and path == "/health":
             status = 200
             payload = {"ok": True}
@@ -306,6 +321,26 @@ class RoomHostService:
         self.room.is_paused = self._is_paused
         return 200, {"ok": True, "room": self._room_payload()}
 
+    def _handle_movie(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        if self.room is None:
+            return 503, {"ok": False, "error": "room is not active"}
+
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return 400, {"ok": False, "error": "invalid JSON"}
+
+        if data.get("room_id") != self.room.room_id:
+            return 404, {"ok": False, "error": "room ID does not match this host"}
+
+        movie = _movie_from_payload(data.get("movie"))
+        if movie is None:
+            return 400, {"ok": False, "error": "movie info is missing"}
+
+        self._movie = movie
+        self.room.movie = movie
+        return 200, {"ok": True, "room": self._room_payload()}
+
     def _room_payload(self) -> dict[str, Any]:
         if self.room is None:
             return {}
@@ -319,6 +354,7 @@ class RoomHostService:
             "compact_code": self.room.compact_code,
             "participants": self.room.participants,
             "is_paused": self._is_paused,
+            "movie": _movie_payload(self._movie) if self._movie is not None else None,
         }
 
 
@@ -391,6 +427,27 @@ class RoomClient:
 
         return chat_message_from_payload(payload["message"])
 
+    async def send_prepared_attachment(
+        self,
+        target: JoinTarget,
+        attachment: ChatAttachment,
+        caption: str = "",
+    ) -> ChatMessage:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/messages",
+                json={
+                    "room_id": target.room_id,
+                    "author": self.display_name,
+                    "text": caption,
+                    "attachment": _attachment_payload(attachment),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return chat_message_from_payload(payload["message"])
+
     async def send_reaction(
         self,
         target: JoinTarget,
@@ -418,6 +475,20 @@ class RoomClient:
                 json={
                     "room_id": target.room_id,
                     "is_paused": is_paused,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return room_info_from_payload(payload["room"])
+
+    async def update_movie(self, target: JoinTarget, movie: RoomMovieInfo) -> RoomInfo:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/movie",
+                json={
+                    "room_id": target.room_id,
+                    "movie": _movie_payload(movie),
                 },
             )
             response.raise_for_status()
@@ -453,6 +524,7 @@ def room_info_from_payload(room_payload: dict[str, Any]) -> RoomInfo:
         compact_code=room_payload["compact_code"],
         participants=list(room_payload["participants"]),
         is_paused=bool(room_payload.get("is_paused", False)),
+        movie=_movie_from_payload(room_payload.get("movie")),
     )
 
 
@@ -572,6 +644,33 @@ def _attachment_from_payload(payload: Any) -> ChatAttachment | None:
         filename=filename,
         mime_type=mime_type,
         data_base64=data_base64,
+    )
+
+
+def _movie_payload(movie: RoomMovieInfo) -> dict[str, str]:
+    return {
+        "title": movie.title,
+        "year": movie.year,
+        "plot": movie.plot,
+        "actors": movie.actors,
+        "rating": movie.rating,
+    }
+
+
+def _movie_from_payload(payload: Any) -> RoomMovieInfo | None:
+    if not isinstance(payload, dict):
+        return None
+
+    title = str(payload.get("title") or "")
+    if not title:
+        return None
+
+    return RoomMovieInfo(
+        title=title,
+        year=str(payload.get("year") or ""),
+        plot=str(payload.get("plot") or ""),
+        actors=str(payload.get("actors") or ""),
+        rating=str(payload.get("rating") or ""),
     )
 
 

@@ -4,8 +4,10 @@ import httpx
 import pytest
 
 from app.services.room_service import (
+    ChatAttachment,
     RoomClient,
     RoomHostService,
+    RoomMovieInfo,
     build_invite_link,
     parse_join_target,
 )
@@ -221,5 +223,66 @@ async def test_non_image_attachment_keeps_filename_and_extension(tmp_path) -> No
         assert messages[-1].attachment is not None
         assert messages[-1].attachment.filename == "example.txt"
         assert messages[-1].attachment.mime_type == "text/plain"
+    finally:
+        await host.stop()
+
+
+@pytest.mark.anyio
+async def test_prepared_gif_attachment_round_trips() -> None:
+    host = RoomHostService(display_name="Host")
+    room = await host.start_room("GIF Room")
+
+    try:
+        local_invite = build_invite_link(
+            room_id=room.room_id,
+            room_name=room.room_name,
+            host="127.0.0.1",
+            port=room.port,
+        )
+        target = parse_join_target(local_invite)
+        client = RoomClient(display_name="Viewer")
+        attachment = ChatAttachment(
+            filename="popcorn.gif",
+            mime_type="image/gif",
+            data_base64="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+        )
+
+        await client.send_prepared_attachment(target=target, attachment=attachment)
+        _room, messages = await client.fetch_messages(target=target, after=0)
+
+        assert messages[-1].attachment is not None
+        assert messages[-1].attachment.filename == "popcorn.gif"
+        assert messages[-1].attachment.mime_type == "image/gif"
+    finally:
+        await host.stop()
+
+
+@pytest.mark.anyio
+async def test_movie_info_updates_for_room() -> None:
+    host = RoomHostService(display_name="Host")
+    room = await host.start_room("Movie Info Room")
+
+    try:
+        local_invite = build_invite_link(
+            room_id=room.room_id,
+            room_name=room.room_name,
+            host="127.0.0.1",
+            port=room.port,
+        )
+        target = parse_join_target(local_invite)
+        client = RoomClient(display_name="Viewer")
+        movie = RoomMovieInfo(
+            title="The Matrix",
+            year="1999",
+            plot="A hacker discovers reality is not what it seems.",
+            actors="Keanu Reeves, Laurence Fishburne",
+            rating="8.7",
+        )
+
+        updated_room = await client.update_movie(target=target, movie=movie)
+        fetched_room, _messages = await client.fetch_messages(target=target, after=0)
+
+        assert updated_room.movie == movie
+        assert fetched_room.movie == movie
     finally:
         await host.stop()

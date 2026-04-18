@@ -23,11 +23,13 @@ from PySide6.QtWidgets import (
 from app.services.api_client import ApiClient
 from app.services.movie_info_service import MovieInfo, MovieInfoService
 from app.services.room_service import (
+    ChatAttachment,
     ChatMessage,
     JoinTarget,
     RoomClient,
     RoomHostService,
     RoomInfo,
+    RoomMovieInfo,
     parse_join_target,
 )
 from app.services.ws_client import WsClient
@@ -62,6 +64,8 @@ class MainWindow(QMainWindow):
         self._movie_info_title: QLabel
         self._movie_info_plot: QLabel
         self._movie_info_cast: QLabel
+        self._movie_search_button: QPushButton
+        self._current_movie: RoomMovieInfo | None = None
         self._room_host = RoomHostService(display_name=self.state.display_name)
         self._room_client = RoomClient(display_name=self.state.display_name)
         self._room_target: JoinTarget | None = None
@@ -266,6 +270,7 @@ class MainWindow(QMainWindow):
         self._chat_panel.seed_messages()
         self._chat_panel.message_sent.connect(self._handle_local_message)
         self._chat_panel.file_sent.connect(self._handle_local_file)
+        self._chat_panel.gif_sent.connect(self._handle_local_gif)
         self._chat_panel.reaction_sent.connect(self._send_reaction)
         self._splitter.addWidget(self._chat_panel)
         self._splitter.setSizes([1000, 420])
@@ -494,6 +499,7 @@ class MainWindow(QMainWindow):
         )
         self.state.participants = room.participants
         self.is_paused = room.is_paused
+        self._current_movie = room.movie
 
         self._room_name_label.setText(room.room_name)
         self._connection_label.setText(self.state.connection_status)
@@ -505,6 +511,8 @@ class MainWindow(QMainWindow):
         self._chat_panel.clear_messages()
         self._refresh_participants(room.participants)
         self._apply_pause_state(room.is_paused)
+        if room.movie is not None:
+            self._apply_room_movie(room.movie)
 
     def _refresh_participants(self, participants: list[str]) -> None:
         self.state.participants = participants
@@ -548,6 +556,14 @@ class MainWindow(QMainWindow):
             return
         asyncio.create_task(self._send_file_async(self._room_target, file_path))
 
+    def _handle_local_gif(self, attachment: ChatAttachment) -> None:
+        if self._room_target is None:
+            self.statusBar().showMessage(
+                "Join or create a room before sending GIFs.", 2500
+            )
+            return
+        asyncio.create_task(self._send_gif_async(self._room_target, attachment))
+
     def _send_reaction(self, message_id: int, reaction: str) -> None:
         if self._room_target is None:
             self.statusBar().showMessage("Join or create a room before reacting.", 2500)
@@ -589,6 +605,21 @@ class MainWindow(QMainWindow):
             return
         self._append_chat_message(chat_message)
 
+    async def _send_gif_async(
+        self,
+        target: JoinTarget,
+        attachment: ChatAttachment,
+    ) -> None:
+        try:
+            chat_message = await self._room_client.send_prepared_attachment(
+                target,
+                attachment,
+            )
+        except Exception as error:
+            self.statusBar().showMessage(f"GIF failed: {error}", 3000)
+            return
+        self._append_chat_message(chat_message)
+
     def _poll_room(self) -> None:
         if self._stack.currentWidget() is not self._room_shell:
             return
@@ -612,6 +643,8 @@ class MainWindow(QMainWindow):
         self._refresh_participants(room.participants)
         if not self.state.is_host and room.is_paused != self.is_paused:
             self._apply_pause_state(room.is_paused)
+        if room.movie is not None:
+            self._apply_room_movie(room.movie)
         for message in messages:
             self._append_chat_message(message)
 
@@ -689,7 +722,21 @@ class MainWindow(QMainWindow):
             self._movie_info_dialog = self._build_movie_info_dialog()
             self._movie_info_dialog.setStyleSheet(self.styleSheet())
 
-        self._movie_search_input.setText(self.state.movie_title)
+        if self.state.is_host:
+            self._movie_search_input.show()
+            self._movie_search_button.show()
+            self._movie_search_input.setText(self.state.movie_title)
+        else:
+            self._movie_search_input.hide()
+            self._movie_search_button.hide()
+            if self._current_movie is None:
+                self._movie_info_title.setText("No movie selected yet.")
+                self._movie_info_plot.setText(
+                    "The host has not imported movie information yet."
+                )
+                self._movie_info_cast.setText("")
+        if self._current_movie is not None:
+            self._apply_room_movie(self._current_movie)
         self._movie_info_dialog.show()
         self._movie_info_dialog.raise_()
         self._movie_info_dialog.activateWindow()
@@ -715,10 +762,10 @@ class MainWindow(QMainWindow):
         self._movie_search_input.returnPressed.connect(self._search_movie_info)
         layout.addWidget(self._movie_search_input)
 
-        search_button = QPushButton("Search")
-        search_button.setObjectName("primaryButton")
-        search_button.clicked.connect(self._search_movie_info)
-        layout.addWidget(search_button)
+        self._movie_search_button = QPushButton("Search")
+        self._movie_search_button.setObjectName("primaryButton")
+        self._movie_search_button.clicked.connect(self._search_movie_info)
+        layout.addWidget(self._movie_search_button)
 
         self._movie_info_title = QLabel("No movie selected yet.")
         self._movie_info_title.setObjectName("movieInfoTitle")
@@ -764,14 +811,42 @@ class MainWindow(QMainWindow):
         self._apply_movie_info(movie)
 
     def _apply_movie_info(self, movie: MovieInfo) -> None:
+        room_movie = RoomMovieInfo(
+            title=movie.title,
+            year=movie.year,
+            plot=movie.plot,
+            actors=movie.actors,
+            rating=movie.rating,
+        )
+        self._apply_room_movie(room_movie)
+        if self.state.is_host and self._room_target is not None:
+            asyncio.create_task(
+                self._broadcast_movie_info(self._room_target, room_movie)
+            )
+
+    def _apply_room_movie(self, movie: RoomMovieInfo) -> None:
         year_suffix = f" ({movie.year})" if movie.year else ""
         rating_suffix = f" • IMDb {movie.rating}" if movie.rating else ""
+        self._current_movie = movie
         self.state.movie_title = movie.title
         self.state.movie_year = movie.year
         self._movie_title_label.setText(f"{movie.title}{year_suffix}")
+        if self._movie_info_dialog is None:
+            return
+
         self._movie_info_title.setText(f"{movie.title}{year_suffix}{rating_suffix}")
-        self._movie_info_plot.setText(movie.plot)
-        self._movie_info_cast.setText(f"Cast: {movie.actors}")
+        self._movie_info_plot.setText(movie.plot or "No description available yet.")
+        self._movie_info_cast.setText(f"Cast: {movie.actors or 'Unknown cast'}")
+
+    async def _broadcast_movie_info(
+        self,
+        target: JoinTarget,
+        movie: RoomMovieInfo,
+    ) -> None:
+        try:
+            await self._room_client.update_movie(target, movie)
+        except Exception as error:
+            self.statusBar().showMessage(f"Movie info did not sync: {error}", 3000)
 
     def _show_invite_hint(self) -> None:
         if not self.state.invite_link:
@@ -988,6 +1063,11 @@ class MainWindow(QMainWindow):
                 border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 18px;
             }
+            QDialog#gifLibraryDialog {
+                background: #17172c;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 18px;
+            }
             QListWidget#participantList {
                 background: #232339;
                 color: #ffffff;
@@ -1095,6 +1175,10 @@ class MainWindow(QMainWindow):
                 max-height: 34px;
                 border-radius: 17px;
                 padding: 0px;
+                background: transparent;
+                border: 1px solid transparent;
+            }
+            QPushButton#bubbleReactionButton:hover {
                 background: rgba(255, 255, 255, 0.1);
                 border: 1px solid rgba(255, 255, 255, 0.12);
             }
@@ -1188,6 +1272,14 @@ class MainWindow(QMainWindow):
                 padding: 0px;
                 background: rgba(255, 255, 255, 0.04);
                 color: rgba(255, 255, 255, 0.35);
+            }
+            QPushButton#gifChoiceButton {
+                background: rgba(255, 255, 255, 0.05);
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 12px;
+                padding: 10px 12px;
+                text-align: left;
             }
             QPushButton#transportButton {
                 min-width: 150px;
