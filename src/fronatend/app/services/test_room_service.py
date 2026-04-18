@@ -113,3 +113,54 @@ async def test_viewer_leave_updates_participants() -> None:
         assert "Viewer" not in updated_room.participants
     finally:
         await host.stop()
+
+
+@pytest.mark.anyio
+async def test_playback_state_updates_for_room() -> None:
+    host = RoomHostService(display_name="Host")
+    room = await host.start_room("Pause Room")
+
+    try:
+        local_invite = build_invite_link(
+            room_id=room.room_id,
+            room_name=room.room_name,
+            host="127.0.0.1",
+            port=room.port,
+        )
+        target = parse_join_target(local_invite)
+        client = RoomClient(display_name="Viewer")
+
+        updated_room = await client.update_playback(target, is_paused=True)
+        fetched_room, _messages = await client.fetch_messages(target=target, after=0)
+
+        assert updated_room.is_paused is True
+        assert fetched_room.is_paused is True
+    finally:
+        await host.stop()
+
+
+@pytest.mark.anyio
+async def test_attachment_message_round_trips(tmp_path) -> None:
+    host = RoomHostService(display_name="Host")
+    room = await host.start_room("File Room")
+
+    try:
+        image_path = tmp_path / "poster.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-png-data")
+        local_invite = build_invite_link(
+            room_id=room.room_id,
+            room_name=room.room_name,
+            host="127.0.0.1",
+            port=room.port,
+        )
+        target = parse_join_target(local_invite)
+        client = RoomClient(display_name="Viewer")
+
+        await client.send_attachment(target=target, file_path=str(image_path))
+        _room, messages = await client.fetch_messages(target=target, after=0)
+
+        assert messages[-1].attachment is not None
+        assert messages[-1].attachment.filename == "poster.png"
+        assert messages[-1].attachment.mime_type == "image/png"
+    finally:
+        await host.stop()

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import mimetypes
+from pathlib import Path
 import secrets
 import socket
 from dataclasses import dataclass, field
@@ -35,6 +37,14 @@ class RoomInfo:
     invite_link: str
     compact_code: str
     participants: list[str] = field(default_factory=list)
+    is_paused: bool = False
+
+
+@dataclass(frozen=True)
+class ChatAttachment:
+    filename: str
+    mime_type: str
+    data_base64: str
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,7 @@ class ChatMessage:
     id: int
     author: str
     text: str
+    attachment: ChatAttachment | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +69,7 @@ class RoomHostService:
         self._server: asyncio.AbstractServer | None = None
         self._messages: list[ChatMessage] = []
         self._next_message_id = 1
+        self._is_paused = False
 
     async def start_room(self, room_name: str) -> RoomInfo:
         await self.stop()
@@ -87,9 +99,11 @@ class RoomHostService:
             invite_link=invite_link,
             compact_code=compact_code,
             participants=[self.display_name],
+            is_paused=False,
         )
         self._messages = []
         self._next_message_id = 1
+        self._is_paused = False
         return self.room
 
     async def stop(self) -> None:
@@ -100,6 +114,7 @@ class RoomHostService:
         self.room = None
         self._messages = []
         self._next_message_id = 1
+        self._is_paused = False
 
     async def _handle_client(
         self,
@@ -138,6 +153,8 @@ class RoomHostService:
             status, payload = self._handle_get_messages(path)
         elif method == "POST" and path == "/messages":
             status, payload = self._handle_post_message(body)
+        elif method == "POST" and path == "/playback":
+            status, payload = self._handle_playback(body)
         elif method == "GET" and path == "/health":
             status = 200
             payload = {"ok": True}
@@ -198,7 +215,7 @@ class RoomHostService:
         return 200, {
             "ok": True,
             "messages": [
-                {"id": message.id, "author": message.author, "text": message.text}
+                _message_payload(message)
                 for message in self._messages
                 if message.id > after
             ],
@@ -219,10 +236,16 @@ class RoomHostService:
 
         author = str(data.get("author") or "Viewer")
         text = str(data.get("text") or "").strip()
-        if not text:
+        attachment = _attachment_from_payload(data.get("attachment"))
+        if not text and attachment is None:
             return 400, {"ok": False, "error": "message cannot be empty"}
 
-        message = ChatMessage(id=self._next_message_id, author=author, text=text)
+        message = ChatMessage(
+            id=self._next_message_id,
+            author=author,
+            text=text,
+            attachment=attachment,
+        )
         self._next_message_id += 1
         self._messages.append(message)
         if author not in self.room.participants:
@@ -230,13 +253,25 @@ class RoomHostService:
 
         return 200, {
             "ok": True,
-            "message": {
-                "id": message.id,
-                "author": message.author,
-                "text": message.text,
-            },
+            "message": _message_payload(message),
             "room": self._room_payload(),
         }
+
+    def _handle_playback(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        if self.room is None:
+            return 503, {"ok": False, "error": "room is not active"}
+
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return 400, {"ok": False, "error": "invalid JSON"}
+
+        if data.get("room_id") != self.room.room_id:
+            return 404, {"ok": False, "error": "room ID does not match this host"}
+
+        self._is_paused = bool(data.get("is_paused"))
+        self.room.is_paused = self._is_paused
+        return 200, {"ok": True, "room": self._room_payload()}
 
     def _room_payload(self) -> dict[str, Any]:
         if self.room is None:
@@ -250,6 +285,7 @@ class RoomHostService:
             "invite_link": self.room.invite_link,
             "compact_code": self.room.compact_code,
             "participants": self.room.participants,
+            "is_paused": self._is_paused,
         }
 
 
@@ -298,11 +334,43 @@ class RoomClient:
             payload = response.json()
 
         message = payload["message"]
-        return ChatMessage(
-            id=int(message["id"]),
-            author=str(message["author"]),
-            text=str(message["text"]),
-        )
+        return chat_message_from_payload(message)
+
+    async def send_attachment(
+        self,
+        target: JoinTarget,
+        file_path: str,
+        caption: str = "",
+    ) -> ChatMessage:
+        attachment = attachment_from_file(file_path)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/messages",
+                json={
+                    "room_id": target.room_id,
+                    "author": self.display_name,
+                    "text": caption,
+                    "attachment": _attachment_payload(attachment),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return chat_message_from_payload(payload["message"])
+
+    async def update_playback(self, target: JoinTarget, is_paused: bool) -> RoomInfo:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/playback",
+                json={
+                    "room_id": target.room_id,
+                    "is_paused": is_paused,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return room_info_from_payload(payload["room"])
 
     async def fetch_messages(
         self,
@@ -318,12 +386,7 @@ class RoomClient:
             payload = response.json()
 
         return room_info_from_payload(payload["room"]), [
-            ChatMessage(
-                id=int(message["id"]),
-                author=str(message["author"]),
-                text=str(message["text"]),
-            )
-            for message in payload["messages"]
+            chat_message_from_payload(message) for message in payload["messages"]
         ]
 
 
@@ -336,6 +399,27 @@ def room_info_from_payload(room_payload: dict[str, Any]) -> RoomInfo:
         invite_link=room_payload["invite_link"],
         compact_code=room_payload["compact_code"],
         participants=list(room_payload["participants"]),
+        is_paused=bool(room_payload.get("is_paused", False)),
+    )
+
+
+def chat_message_from_payload(message: dict[str, Any]) -> ChatMessage:
+    return ChatMessage(
+        id=int(message["id"]),
+        author=str(message["author"]),
+        text=str(message["text"]),
+        attachment=_attachment_from_payload(message.get("attachment")),
+    )
+
+
+def attachment_from_file(file_path: str) -> ChatAttachment:
+    path = Path(file_path)
+    data = path.read_bytes()
+    mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return ChatAttachment(
+        filename=path.name,
+        mime_type=mime_type,
+        data_base64=base64.b64encode(data).decode("ascii"),
     )
 
 
@@ -393,6 +477,44 @@ def _decode_passkey(passkey: str) -> dict[str, Any]:
     padding = "=" * (-len(passkey) % 4)
     raw = base64.urlsafe_b64decode(f"{passkey}{padding}".encode("utf-8"))
     return json.loads(raw.decode("utf-8"))
+
+
+def _message_payload(message: ChatMessage) -> dict[str, Any]:
+    return {
+        "id": message.id,
+        "author": message.author,
+        "text": message.text,
+        "attachment": (
+            _attachment_payload(message.attachment)
+            if message.attachment is not None
+            else None
+        ),
+    }
+
+
+def _attachment_payload(attachment: ChatAttachment) -> dict[str, str]:
+    return {
+        "filename": attachment.filename,
+        "mime_type": attachment.mime_type,
+        "data_base64": attachment.data_base64,
+    }
+
+
+def _attachment_from_payload(payload: Any) -> ChatAttachment | None:
+    if not isinstance(payload, dict):
+        return None
+
+    filename = str(payload.get("filename") or "attachment")
+    mime_type = str(payload.get("mime_type") or "application/octet-stream")
+    data_base64 = str(payload.get("data_base64") or "")
+    if not data_base64:
+        return None
+
+    return ChatAttachment(
+        filename=filename,
+        mime_type=mime_type,
+        data_base64=data_base64,
+    )
 
 
 def _single_param(params: dict[str, list[str]], name: str) -> str:

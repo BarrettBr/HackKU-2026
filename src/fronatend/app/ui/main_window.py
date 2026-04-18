@@ -84,7 +84,7 @@ class MainWindow(QMainWindow):
         self._status_timer.timeout.connect(self._clear_status_text)
 
         self._chrome_timer = QTimer(self)
-        self._chrome_timer.setInterval(1800)
+        self._chrome_timer.setInterval(3600)
         self._chrome_timer.timeout.connect(self._hide_chrome)
         self._room_poll_timer = QTimer(self)
         self._room_poll_timer.setInterval(900)
@@ -247,6 +247,7 @@ class MainWindow(QMainWindow):
         self._chat_panel = ChatPanel()
         self._chat_panel.seed_messages()
         self._chat_panel.message_sent.connect(self._handle_local_message)
+        self._chat_panel.file_sent.connect(self._handle_local_file)
         self._chat_panel.reaction_sent.connect(self._send_reaction)
         self._splitter.addWidget(self._chat_panel)
         self._splitter.setSizes([930, 500])
@@ -470,6 +471,7 @@ class MainWindow(QMainWindow):
             f"Hosting {room.compact_code}" if is_host else f"Joined {room.room_id}"
         )
         self.state.participants = room.participants
+        self.is_paused = room.is_paused
 
         self._room_name_label.setText(room.room_name)
         self._connection_label.setText(self.state.connection_status)
@@ -479,6 +481,7 @@ class MainWindow(QMainWindow):
         self._last_message_id = 0
         self._chat_panel.clear_messages()
         self._refresh_participants(room.participants)
+        self._apply_pause_state(room.is_paused)
 
     def _refresh_participants(self, participants: list[str]) -> None:
         self.state.participants = participants
@@ -514,6 +517,14 @@ class MainWindow(QMainWindow):
             return
         asyncio.create_task(self._send_chat_message_async(self._room_target, message))
 
+    def _handle_local_file(self, file_path: str) -> None:
+        if self._room_target is None:
+            self.statusBar().showMessage(
+                "Join or create a room before attaching.", 2500
+            )
+            return
+        asyncio.create_task(self._send_file_async(self._room_target, file_path))
+
     def _send_reaction(self, emoji: str) -> None:
         self._chat_panel.add_reaction_to_latest_message(emoji)
 
@@ -522,6 +533,14 @@ class MainWindow(QMainWindow):
             chat_message = await self._room_client.send_message(target, message)
         except Exception as error:
             self.statusBar().showMessage(f"Message failed: {error}", 3000)
+            return
+        self._append_chat_message(chat_message)
+
+    async def _send_file_async(self, target: JoinTarget, file_path: str) -> None:
+        try:
+            chat_message = await self._room_client.send_attachment(target, file_path)
+        except Exception as error:
+            self.statusBar().showMessage(f"Upload failed: {error}", 3000)
             return
         self._append_chat_message(chat_message)
 
@@ -546,6 +565,8 @@ class MainWindow(QMainWindow):
             return
 
         self._refresh_participants(room.participants)
+        if not self.state.is_host and room.is_paused != self.is_paused:
+            self._apply_pause_state(room.is_paused)
         for message in messages:
             self._append_chat_message(message)
 
@@ -558,10 +579,17 @@ class MainWindow(QMainWindow):
             message=message.text,
             author_color=self._color_for_author(message.author),
             is_host=message.author == self._host_name(),
+            attachment=message.attachment,
         )
 
     def _toggle_pause(self) -> None:
-        self.is_paused = not self.is_paused
+        next_state = not self.is_paused
+        self._apply_pause_state(next_state)
+        if self.state.is_host and self._room_target is not None:
+            asyncio.create_task(self._broadcast_pause_state(self._room_target))
+
+    def _apply_pause_state(self, is_paused: bool) -> None:
+        self.is_paused = is_paused
         self._pause_button.setText("▶  Play" if self.is_paused else "⏸  Pause")
         if self.is_paused:
             self._status_timer.stop()
@@ -569,6 +597,12 @@ class MainWindow(QMainWindow):
         else:
             self._status_label.setText("Playing")
             self._status_timer.start()
+
+    async def _broadcast_pause_state(self, target: JoinTarget) -> None:
+        try:
+            await self._room_client.update_playback(target, self.is_paused)
+        except Exception as error:
+            self.statusBar().showMessage(f"Could not sync pause: {error}", 3000)
 
     def _clear_status_text(self) -> None:
         if not self.is_paused:
@@ -795,6 +829,10 @@ class MainWindow(QMainWindow):
                 border-radius: 18px;
                 border: 1px solid rgba(255, 255, 255, 0.03);
             }
+            QFrame#attachmentPreview {
+                background: rgba(255, 255, 255, 0.07);
+                border-radius: 14px;
+            }
             QDialog#participantDialog {
                 background: #17172c;
                 border: 1px solid rgba(255, 255, 255, 0.08);
@@ -859,6 +897,15 @@ class MainWindow(QMainWindow):
                 font-size: 17px;
                 font-weight: 600;
             }
+            QLabel#attachmentTitle {
+                color: rgba(255, 255, 255, 0.72);
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QLabel#attachmentImage {
+                background: transparent;
+                border-radius: 10px;
+            }
             QLabel#hostBadge {
                 background: rgba(101, 231, 198, 0.14);
                 color: #65e7c6;
@@ -876,6 +923,11 @@ class MainWindow(QMainWindow):
                 font-size: 14px;
                 font-weight: 700;
             }
+            QLabel#reactionEmoji,
+            QPushButton#quickReactionButton,
+            QPushButton#avatarChip {
+                font-family: "Apple Color Emoji", "Noto Color Emoji", "Segoe UI Emoji", "Twemoji Mozilla", sans-serif;
+            }
             QPushButton,
             QToolButton {
                 background: rgba(255, 255, 255, 0.02);
@@ -892,6 +944,13 @@ class MainWindow(QMainWindow):
             }
             QPushButton#ghostButton {
                 min-width: 108px;
+            }
+            QPushButton#ghostSmallButton {
+                min-width: 84px;
+                padding-left: 12px;
+                padding-right: 12px;
+                background: rgba(255, 255, 255, 0.04);
+                color: rgba(255, 255, 255, 0.66);
             }
             QPushButton#ghostButton,
             QToolButton#menuButton,

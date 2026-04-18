@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Sequence
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -13,6 +16,17 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+)
+
+from app.services.room_service import ChatAttachment
+
+
+REACTION_CHOICES = (
+    ("🔥", "Fire"),
+    ("👏", "Clap"),
+    ("😂", "Laugh"),
+    ("😮", "Wow"),
+    ("❤️", "Love"),
 )
 
 
@@ -27,6 +41,7 @@ class ReactionPill(QFrame):
 
         emoji_label = QLabel(emoji)
         emoji_label.setObjectName("reactionEmoji")
+        emoji_label.setToolTip(emoji)
         self._count_label = QLabel(str(count))
         self._count_label.setObjectName("reactionCount")
 
@@ -47,6 +62,7 @@ class ChatBubble(QFrame):
         message: str,
         author_color: str,
         is_host: bool = False,
+        attachment: ChatAttachment | None = None,
         reactions: Sequence[tuple[str, int]] | None = None,
     ) -> None:
         super().__init__()
@@ -80,9 +96,39 @@ class ChatBubble(QFrame):
         message_label.setTextFormat(Qt.TextFormat.PlainText)
         self._layout.addWidget(message_label)
 
+        if attachment is not None:
+            self._layout.addWidget(self._build_attachment_preview(attachment))
+
         if reactions:
             for emoji, count in reactions:
                 self.add_reaction(emoji, count)
+
+    def _build_attachment_preview(self, attachment: ChatAttachment) -> QWidget:
+        container = QFrame()
+        container.setObjectName("attachmentPreview")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        title = QLabel(f"File: {attachment.filename}")
+        title.setObjectName("attachmentTitle")
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(title)
+
+        if attachment.mime_type in {"image/png", "image/jpeg"}:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(base64.b64decode(attachment.data_base64)):
+                preview = QLabel()
+                preview.setObjectName("attachmentImage")
+                preview.setPixmap(
+                    pixmap.scaledToWidth(
+                        280,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                layout.addWidget(preview)
+
+        return container
 
     def add_reaction(self, emoji: str, increment: int = 1) -> None:
         if self._reactions_row is None:
@@ -105,12 +151,14 @@ class ChatBubble(QFrame):
 class ChatPanel(QFrame):
     message_sent = Signal(str)
     reaction_sent = Signal(str)
+    file_sent = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("chatPanel")
         self.setMinimumWidth(430)
         self.setMaximumWidth(540)
+        self.setAcceptDrops(True)
         self._message_cards: list[ChatBubble] = []
 
         layout = QVBoxLayout(self)
@@ -128,9 +176,10 @@ class ChatPanel(QFrame):
         header_layout.addWidget(title)
         header_layout.addStretch()
 
-        for emoji in ("🔥", "👋", "😂", "😮"):
+        for emoji, label in REACTION_CHOICES:
             button = QPushButton(emoji)
             button.setObjectName("quickReactionButton")
+            button.setToolTip(label)
             button.clicked.connect(
                 lambda _checked=False, value=emoji: self.reaction_sent.emit(value)
             )
@@ -169,11 +218,16 @@ class ChatPanel(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
 
+        attach_button = QPushButton("Attach")
+        attach_button.setObjectName("ghostSmallButton")
+        attach_button.clicked.connect(self._choose_file)
+
         send_button = QPushButton("Send")
         send_button.setObjectName("primaryButton")
         send_button.clicked.connect(self._send_message)
 
         composer_layout.addWidget(self._message_input, 1)
+        composer_layout.addWidget(attach_button)
         composer_layout.addWidget(send_button)
         layout.addWidget(composer)
 
@@ -216,6 +270,7 @@ class ChatPanel(QFrame):
         message: str,
         author_color: str = "#E0BAD7",
         is_host: bool = False,
+        attachment: ChatAttachment | None = None,
         reactions: Sequence[tuple[str, int]] | None = None,
     ) -> None:
         bubble = ChatBubble(
@@ -223,6 +278,7 @@ class ChatPanel(QFrame):
             message=message,
             author_color=author_color,
             is_host=is_host,
+            attachment=attachment,
             reactions=reactions,
         )
         self._message_cards.append(bubble)
@@ -252,6 +308,30 @@ class ChatPanel(QFrame):
 
         self._message_input.clear()
         self.message_sent.emit(message)
+
+    def _choose_file(self) -> None:
+        file_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Attach a file",
+            "",
+            "Supported files (*.png *.jpg *.jpeg);;All files (*)",
+        )
+        if file_path:
+            self.file_sent.emit(file_path)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:  # type: ignore[override]
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                self.file_sent.emit(url.toLocalFile())
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
 
     def _scroll_to_bottom(self) -> None:
         bar = self._scroll_area.verticalScrollBar()
