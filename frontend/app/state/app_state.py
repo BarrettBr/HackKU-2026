@@ -8,5 +8,5 @@ class AppState:
     room_name: str = "Friday Movie Room"
     display_name: str = "Local User"
     participants: list[str] = field(
-        default_factory=lambda: ["Barrett (Host)", "Alex", "Jordan"]
+        default_factory=lambda: ["User1 (Host)", "User2", "User3", "User4"]
     )

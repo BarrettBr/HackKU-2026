@@ -1,27 +1,23 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QFrame, QLabel, QListWidget, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QLabel, QListWidget, QVBoxLayout
 
 
-class UserList(QFrame):
-    def __init__(self) -> None:
+class UserListDialog(QDialog):
+    def __init__(self, participants: list[str]) -> None:
         super().__init__()
-        self.setObjectName("panel")
+        self.setWindowTitle("Participants")
+        self.setModal(False)
+        self.setMinimumWidth(280)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        title = QLabel("Participants")
+        title = QLabel("People in the room")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
 
         users = QListWidget()
-        users.addItems(
-            [
-                "Barrett (Host)",
-                "Alex",
-                "Jordan",
-            ]
-        )
+        users.addItems(participants)
         layout.addWidget(users)
