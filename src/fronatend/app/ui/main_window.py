@@ -5,10 +5,13 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -58,7 +61,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_styles()
         self._install_mouse_tracking(self.centralWidget())
-        self._show_chrome()
+        self._show_landing()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -68,12 +71,131 @@ class MainWindow(QMainWindow):
         page.setContentsMargins(0, 0, 0, 0)
         page.setSpacing(0)
 
+        self._stack = QStackedWidget()
+        page.addWidget(self._stack)
+
+        self._landing_page = self._build_landing_page()
+        self._stack.addWidget(self._landing_page)
+
+        self._room_shell = self._build_room_shell()
+        self._stack.addWidget(self._room_shell)
+
+    def _build_landing_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("landingPage")
+
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(80, 80, 80, 80)
+        layout.setSpacing(24)
+        layout.addStretch()
+
+        card = QFrame()
+        card.setObjectName("landingCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(36, 36, 36, 36)
+        card_layout.setSpacing(18)
+
+        eyebrow = QLabel("Moovie Night")
+        eyebrow.setObjectName("landingEyebrow")
+        card_layout.addWidget(eyebrow)
+
+        title = QLabel("Watch together from one room.")
+        title.setObjectName("landingTitle")
+        title.setWordWrap(True)
+        card_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Create a room to host a stream, or join an existing room with an ID."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setObjectName("landingSubtitle")
+        card_layout.addWidget(subtitle)
+
+        self._landing_flow = QStackedWidget()
+
+        chooser = QWidget()
+        chooser_layout = QVBoxLayout(chooser)
+        chooser_layout.setContentsMargins(0, 0, 0, 0)
+        chooser_layout.setSpacing(12)
+
+        create_button = QPushButton("Create Room")
+        create_button.setObjectName("landingPrimaryButton")
+        create_button.clicked.connect(self._show_create_flow)
+
+        join_button = QPushButton("Join Room")
+        join_button.setObjectName("landingSecondaryButton")
+        join_button.clicked.connect(self._show_join_flow)
+
+        chooser_layout.addWidget(create_button)
+        chooser_layout.addWidget(join_button)
+        self._landing_flow.addWidget(chooser)
+
+        create_form = QWidget()
+        create_layout = QVBoxLayout(create_form)
+        create_layout.setContentsMargins(0, 0, 0, 0)
+        create_layout.setSpacing(12)
+
+        self._room_name_input = QLineEdit()
+        self._room_name_input.setObjectName("roomNameInput")
+        self._room_name_input.setPlaceholderText("Choose a room name")
+        self._room_name_input.returnPressed.connect(self._create_room)
+        create_layout.addWidget(self._room_name_input)
+
+        create_actions = QHBoxLayout()
+        create_actions.setSpacing(12)
+
+        start_button = QPushButton("Start Streaming")
+        start_button.setObjectName("landingPrimaryButton")
+        start_button.clicked.connect(self._create_room)
+
+        back_from_create = QPushButton("Back")
+        back_from_create.setObjectName("landingSecondaryButton")
+        back_from_create.clicked.connect(self._show_landing_options)
+
+        create_actions.addWidget(start_button)
+        create_actions.addWidget(back_from_create)
+        create_layout.addLayout(create_actions)
+        self._landing_flow.addWidget(create_form)
+
+        join_form = QWidget()
+        join_layout = QVBoxLayout(join_form)
+        join_layout.setContentsMargins(0, 0, 0, 0)
+        join_layout.setSpacing(12)
+
+        self._room_id_input = QLineEdit()
+        self._room_id_input.setObjectName("roomIdInput")
+        self._room_id_input.setPlaceholderText("Enter room ID")
+        self._room_id_input.returnPressed.connect(self._join_room)
+        join_layout.addWidget(self._room_id_input)
+
+        join_actions = QHBoxLayout()
+        join_actions.setSpacing(12)
+
+        enter_button = QPushButton("Enter Room")
+        enter_button.setObjectName("landingPrimaryButton")
+        enter_button.clicked.connect(self._join_room)
+
+        back_from_join = QPushButton("Back")
+        back_from_join.setObjectName("landingSecondaryButton")
+        back_from_join.clicked.connect(self._show_landing_options)
+
+        join_actions.addWidget(enter_button)
+        join_actions.addWidget(back_from_join)
+        join_layout.addLayout(join_actions)
+        self._landing_flow.addWidget(join_form)
+
+        card_layout.addWidget(self._landing_flow)
+
+        layout.addWidget(card, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch()
+        return page
+
+    def _build_room_shell(self) -> QWidget:
         shell = QFrame()
         shell.setObjectName("shell")
         shell_layout = QVBoxLayout(shell)
         shell_layout.setContentsMargins(0, 0, 0, 0)
         shell_layout.setSpacing(0)
-        page.addWidget(shell)
 
         self._top_bar = self._build_top_bar()
         shell_layout.addWidget(self._top_bar)
@@ -94,6 +216,7 @@ class MainWindow(QMainWindow):
 
         self._bottom_bar = self._build_bottom_bar()
         shell_layout.addWidget(self._bottom_bar)
+        return shell
 
     def _build_top_bar(self) -> QFrame:
         frame = QFrame()
@@ -103,9 +226,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(32, 18, 32, 18)
         layout.setSpacing(18)
 
-        room_name = QLabel(self.state.room_name)
-        room_name.setObjectName("roomName")
-        layout.addWidget(room_name)
+        self._room_name_label = QLabel(self.state.room_name)
+        self._room_name_label.setObjectName("roomName")
+        layout.addWidget(self._room_name_label)
 
         live_badge = QLabel("LIVE")
         live_badge.setObjectName("liveBadge")
@@ -132,9 +255,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(avatars)
 
-        watching = QLabel(f"{len(self.state.participants)} watching")
-        watching.setObjectName("watchingLabel")
-        layout.addWidget(watching)
+        self._watching_label = QLabel(f"{len(self.state.participants)} watching")
+        self._watching_label.setObjectName("watchingLabel")
+        layout.addWidget(self._watching_label)
 
         invite_button = QPushButton("Invite")
         invite_button.setObjectName("ghostButton")
@@ -190,13 +313,15 @@ class MainWindow(QMainWindow):
         info_col = QVBoxLayout()
         info_col.setSpacing(2)
 
-        movie_title = QLabel(f"{self.state.movie_title} ({self.state.movie_year})")
-        movie_title.setObjectName("movieTitle")
-        info_col.addWidget(movie_title)
+        self._movie_title_label = QLabel(
+            f"{self.state.movie_title} ({self.state.movie_year})"
+        )
+        self._movie_title_label.setObjectName("movieTitle")
+        info_col.addWidget(self._movie_title_label)
 
-        viewers = QLabel(f"{len(self.state.participants)} viewers")
-        viewers.setObjectName("viewerLabel")
-        info_col.addWidget(viewers)
+        self._viewer_label = QLabel(f"{len(self.state.participants)} viewers")
+        self._viewer_label.setObjectName("viewerLabel")
+        info_col.addWidget(self._viewer_label)
         layout.addLayout(info_col)
 
         layout.addStretch()
@@ -206,15 +331,73 @@ class MainWindow(QMainWindow):
         self._pause_button.clicked.connect(self._toggle_pause)
         layout.addWidget(self._pause_button)
 
-        volume_button = QPushButton("🔊")
-        volume_button.setObjectName("iconButton")
-        layout.addWidget(volume_button)
+        self._volume_button = QPushButton("🔊")
+        self._volume_button.setObjectName("iconButton")
+        self._volume_button.clicked.connect(self._toggle_volume_controls)
+        layout.addWidget(self._volume_button)
+
+        self._volume_controls = QFrame()
+        self._volume_controls.setObjectName("volumeControls")
+        volume_layout = QHBoxLayout(self._volume_controls)
+        volume_layout.setContentsMargins(0, 0, 0, 0)
+        volume_layout.setSpacing(10)
+
+        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider.setObjectName("volumeSlider")
+        self._volume_slider.setRange(0, 100)
+        self._volume_slider.setValue(70)
+        volume_layout.addWidget(self._volume_slider)
+
+        self._volume_label = QLabel("70%")
+        self._volume_label.setObjectName("volumeLabel")
+        self._volume_slider.valueChanged.connect(
+            lambda value: self._volume_label.setText(f"{value}%")
+        )
+        volume_layout.addWidget(self._volume_label)
+        self._volume_controls.hide()
+        layout.addWidget(self._volume_controls)
 
         leave_button = QPushButton("Leave")
         leave_button.setObjectName("leaveButton")
         leave_button.clicked.connect(self._leave_room)
         layout.addWidget(leave_button)
         return frame
+
+    def _show_landing(self) -> None:
+        self._stack.setCurrentWidget(self._landing_page)
+        self._chrome_timer.stop()
+        self._show_landing_options()
+
+    def _show_room(self) -> None:
+        self._stack.setCurrentWidget(self._room_shell)
+        self._show_chrome()
+        self._volume_controls.hide()
+
+    def _show_landing_options(self) -> None:
+        self._landing_flow.setCurrentIndex(0)
+
+    def _show_create_flow(self) -> None:
+        self._landing_flow.setCurrentIndex(1)
+        self._room_name_input.setFocus()
+
+    def _show_join_flow(self) -> None:
+        self._landing_flow.setCurrentIndex(2)
+        self._room_id_input.setFocus()
+
+    def _create_room(self) -> None:
+        room_name = self._room_name_input.text().strip() or "Friday Movie Room"
+        self.state.room_name = room_name
+        self._room_name_label.setText(room_name)
+        self._show_room()
+
+    def _join_room(self) -> None:
+        room_id = self._room_id_input.text().strip() or "Room ABC123"
+        self.state.room_name = room_id
+        self._room_name_label.setText(room_id)
+        self._show_room()
+
+    def _toggle_volume_controls(self) -> None:
+        self._volume_controls.setVisible(not self._volume_controls.isVisible())
 
     def _handle_local_message(self, message: str) -> None:
         self._chat_panel.add_message("You", message, author_color="#E0BAD7")
@@ -237,11 +420,15 @@ class MainWindow(QMainWindow):
             self._status_label.clear()
 
     def _show_chrome(self) -> None:
+        if self._stack.currentWidget() is not self._room_shell:
+            return
         self._top_bar.show()
         self._bottom_bar.show()
         self._chrome_timer.start()
 
     def _hide_chrome(self) -> None:
+        if self._stack.currentWidget() is not self._room_shell:
+            return
         self._top_bar.hide()
         self._bottom_bar.hide()
 
@@ -254,10 +441,8 @@ class MainWindow(QMainWindow):
             self._splitter.setSizes([1440, 0])
 
     def _show_participants(self) -> None:
-        if self._user_list_dialog is None:
-            self._user_list_dialog = UserListDialog(self.state.participants)
-            self._user_list_dialog.setStyleSheet(self.styleSheet())
-
+        self._user_list_dialog = UserListDialog(self.state.participants)
+        self._user_list_dialog.setStyleSheet(self.styleSheet())
         button_pos = self.mapToGlobal(QPoint(self.width() - 360, 78))
         self._user_list_dialog.move(button_pos)
         self._user_list_dialog.show()
@@ -270,9 +455,8 @@ class MainWindow(QMainWindow):
         )
 
     def _leave_room(self) -> None:
-        self.statusBar().showMessage(
-            "Leaving room would end the session for everyone.", 3000
-        )
+        self._show_landing()
+        self.statusBar().showMessage("Left the room.", 2000)
 
     def _install_mouse_tracking(self, widget: QObject | None) -> None:
         if widget is None:
@@ -291,7 +475,10 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if event.key() == Qt.Key.Key_Space:
+        if (
+            event.key() == Qt.Key.Key_Space
+            and self._stack.currentWidget() is self._room_shell
+        ):
             self._toggle_pause()
             return
         super().keyPressEvent(event)
@@ -309,6 +496,59 @@ class MainWindow(QMainWindow):
             }
             QLabel {
                 background: transparent;
+            }
+            QWidget#landingPage {
+                background: #0b0c13;
+            }
+            QFrame#landingCard {
+                background: #17172c;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 28px;
+                min-width: 620px;
+                max-width: 620px;
+            }
+            QLabel#landingEyebrow {
+                color: #e0bad7;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QLabel#landingTitle {
+                font-size: 34px;
+                font-weight: 800;
+                min-height: 96px;
+            }
+            QLabel#landingSubtitle {
+                color: rgba(255, 255, 255, 0.72);
+                font-size: 16px;
+            }
+            QLineEdit#roomIdInput,
+            QLineEdit#roomNameInput {
+                background: #232339;
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 14px;
+                padding: 16px 18px;
+                font-size: 16px;
+                font-weight: 600;
+                min-height: 26px;
+            }
+            QPushButton#landingPrimaryButton {
+                background: #f55d59;
+                color: #ffffff;
+                border: none;
+                border-radius: 14px;
+                padding: 14px 18px;
+                font-weight: 700;
+                min-height: 24px;
+            }
+            QPushButton#landingSecondaryButton {
+                background: transparent;
+                color: #e0bad7;
+                border: 1px solid rgba(224, 186, 215, 0.3);
+                border-radius: 14px;
+                padding: 14px 18px;
+                font-weight: 700;
+                min-height: 24px;
             }
             QFrame#shell {
                 background: #121224;
@@ -353,6 +593,18 @@ class MainWindow(QMainWindow):
                 border-radius: 18px;
                 border: 1px solid rgba(255, 255, 255, 0.03);
             }
+            QDialog#participantDialog {
+                background: #17172c;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 18px;
+            }
+            QListWidget#participantList {
+                background: #232339;
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 12px;
+                padding: 8px;
+            }
             QLabel#roomName {
                 font-size: 24px;
                 font-weight: 700;
@@ -368,7 +620,8 @@ class MainWindow(QMainWindow):
             }
             QLabel#watchingLabel,
             QLabel#viewerLabel,
-            QLabel#videoStatus {
+            QLabel#videoStatus,
+            QLabel#volumeLabel {
                 color: rgba(255, 255, 255, 0.62);
                 font-size: 13px;
                 font-weight: 600;
@@ -440,7 +693,6 @@ class MainWindow(QMainWindow):
             QPushButton#ghostButton,
             QToolButton#menuButton,
             QPushButton#transportButton,
-            QPushButton#iconButton,
             QPushButton#leaveButton {
                 background: transparent;
                 border-color: transparent;
@@ -448,7 +700,6 @@ class MainWindow(QMainWindow):
             QPushButton#ghostButton:hover,
             QToolButton#menuButton:hover,
             QPushButton#transportButton:hover,
-            QPushButton#iconButton:hover,
             QPushButton#leaveButton:hover {
                 background: rgba(255, 255, 255, 0.04);
                 border-color: transparent;
@@ -478,15 +729,12 @@ class MainWindow(QMainWindow):
                 min-width: 150px;
                 color: rgba(255, 255, 255, 0.42);
             }
-            QPushButton#iconButton {
-                min-width: 52px;
-                min-height: 52px;
-                padding: 0px;
-                font-size: 22px;
-            }
             QPushButton#leaveButton {
                 color: #ff8c7c;
                 min-width: 110px;
+            }
+            QFrame#volumeControls {
+                background: transparent;
             }
             QToolButton#menuButton {
                 min-width: 52px;
@@ -503,8 +751,10 @@ class MainWindow(QMainWindow):
                 font-size: 18px;
                 font-weight: 600;
             }
+            QSlider#volumeSlider {
+                min-width: 140px;
+            }
             QListWidget {
-                background: transparent;
                 border: none;
             }
             QStatusBar {
