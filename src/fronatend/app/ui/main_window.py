@@ -773,7 +773,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._movie_info_title)
 
         self._movie_info_plot = QLabel(
-            "Backend endpoint expected: GET /movies/search?q=movie title"
+            "Search a title to select it for the room. If OMDB_API_KEY is set, "
+            "live IMDb-sourced plot, cast, year, and rating details will load."
         )
         self._movie_info_plot.setObjectName("movieInfoBody")
         self._movie_info_plot.setWordWrap(True)

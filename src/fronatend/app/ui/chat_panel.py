@@ -4,13 +4,14 @@ import base64
 from collections.abc import Sequence
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSize, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QDragEnterEvent,
     QDropEvent,
     QIcon,
     QKeyEvent,
+    QMovie,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -152,6 +153,8 @@ class ChatBubble(QFrame):
         self.message_id = message_id
         self._reaction_pills: dict[str, ReactionPill] = {}
         self._reactions_row: QHBoxLayout | None = None
+        self._gif_buffers: list[QBuffer] = []
+        self._gif_movies: list[QMovie] = []
         self._selected = False
         self._author_color = author_color
 
@@ -237,9 +240,23 @@ class ChatBubble(QFrame):
         title.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(title)
 
-        if attachment.mime_type in {"image/png", "image/jpeg", "image/gif"}:
+        file_data = base64.b64decode(attachment.data_base64)
+        if attachment.mime_type == "image/gif":
+            preview = QLabel()
+            preview.setObjectName("attachmentImage")
+            buffer = QBuffer(self)
+            buffer.setData(QByteArray(file_data))
+            buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+            movie = QMovie(buffer, QByteArray(b"gif"), self)
+            movie.setScaledSize(QSize(280, 180))
+            preview.setMovie(movie)
+            layout.addWidget(preview)
+            self._gif_buffers.append(buffer)
+            self._gif_movies.append(movie)
+            movie.start()
+        elif attachment.mime_type in {"image/png", "image/jpeg"}:
             pixmap = QPixmap()
-            if pixmap.loadFromData(base64.b64decode(attachment.data_base64)):
+            if pixmap.loadFromData(file_data):
                 preview = QLabel()
                 preview.setObjectName("attachmentImage")
                 preview.setPixmap(
