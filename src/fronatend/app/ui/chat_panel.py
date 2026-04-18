@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Sequence
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -21,17 +22,32 @@ from PySide6.QtWidgets import (
 from app.services.room_service import ChatAttachment
 
 
-REACTION_CHOICES = (
-    ("🔥", "Fire"),
-    ("👏", "Clap"),
-    ("😂", "Laugh"),
-    ("😮", "Wow"),
-    ("❤️", "Love"),
+REACTION_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "reactions"
+
+REACTION_CHOICES: tuple[tuple[str, str, str], ...] = (
+    ("🔥", "Fire", "fire.svg"),
+    ("👏", "Clap", "clap.svg"),
+    ("😂", "Laugh", "laugh.svg"),
+    ("😮", "Wow", "wow.svg"),
+    ("♥", "Love", "love.svg"),
 )
 
 
+REACTION_LABELS = {reaction: label for reaction, label, _icon in REACTION_CHOICES}
+REACTION_ICONS = {
+    reaction: REACTION_ICON_DIR / icon for reaction, _label, icon in REACTION_CHOICES
+}
+
+
+def reaction_icon(reaction: str) -> QIcon:
+    icon_path = REACTION_ICONS.get(reaction)
+    if icon_path is None:
+        return QIcon()
+    return QIcon(str(icon_path))
+
+
 class ReactionPill(QFrame):
-    def __init__(self, emoji: str, count: int) -> None:
+    def __init__(self, reaction: str, count: int) -> None:
         super().__init__()
         self.setObjectName("reactionPill")
 
@@ -39,13 +55,14 @@ class ReactionPill(QFrame):
         layout.setContentsMargins(12, 7, 12, 7)
         layout.setSpacing(8)
 
-        emoji_label = QLabel(emoji)
-        emoji_label.setObjectName("reactionEmoji")
-        emoji_label.setToolTip(emoji)
+        icon_label = QLabel()
+        icon_label.setObjectName("reactionIcon")
+        icon_label.setToolTip(REACTION_LABELS.get(reaction, reaction))
+        icon_label.setPixmap(reaction_icon(reaction).pixmap(QSize(20, 20)))
         self._count_label = QLabel(str(count))
         self._count_label.setObjectName("reactionCount")
 
-        layout.addWidget(emoji_label)
+        layout.addWidget(icon_label)
         layout.addWidget(self._count_label)
 
     def set_count(self, count: int) -> None:
@@ -56,8 +73,11 @@ class ReactionPill(QFrame):
 
 
 class ChatBubble(QFrame):
+    clicked = Signal(int)
+
     def __init__(
         self,
+        message_id: int,
         author: str,
         message: str,
         author_color: str,
@@ -67,8 +87,10 @@ class ChatBubble(QFrame):
     ) -> None:
         super().__init__()
         self.setObjectName("chatBubble")
+        self.message_id = message_id
         self._reaction_pills: dict[str, ReactionPill] = {}
         self._reactions_row: QHBoxLayout | None = None
+        self._selected = False
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(20, 16, 20, 16)
@@ -100,8 +122,12 @@ class ChatBubble(QFrame):
             self._layout.addWidget(self._build_attachment_preview(attachment))
 
         if reactions:
-            for emoji, count in reactions:
-                self.add_reaction(emoji, count)
+            self.set_reactions(dict(reactions))
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.message_id)
+        super().mousePressEvent(event)
 
     def _build_attachment_preview(self, attachment: ChatAttachment) -> QWidget:
         container = QFrame()
@@ -110,7 +136,7 @@ class ChatBubble(QFrame):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
 
-        title = QLabel(f"File: {attachment.filename}")
+        title = QLabel(attachment.filename)
         title.setObjectName("attachmentTitle")
         title.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(title)
@@ -128,7 +154,61 @@ class ChatBubble(QFrame):
                 )
                 layout.addWidget(preview)
 
+        download_button = QPushButton("Download")
+        download_button.setObjectName("downloadButton")
+        download_button.clicked.connect(lambda: self._download_attachment(attachment))
+        layout.addWidget(download_button, 0, Qt.AlignmentFlag.AlignLeft)
         return container
+
+    def _download_attachment(self, attachment: ChatAttachment) -> None:
+        suggested_path = str(Path.home() / "Downloads" / attachment.filename)
+        file_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save attachment",
+            suggested_path,
+            "All files (*)",
+        )
+        if not file_path:
+            return
+
+        Path(file_path).write_bytes(base64.b64decode(attachment.data_base64))
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = selected
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def set_reactions(self, reactions: dict[str, int]) -> None:
+        if self._reactions_row is None and reactions:
+            self._reactions_row = QHBoxLayout()
+            self._reactions_row.setSpacing(8)
+            self._reactions_row.setContentsMargins(0, 0, 0, 0)
+            self._layout.addLayout(self._reactions_row)
+            self._reactions_row.addStretch()
+
+        for reaction in list(self._reaction_pills):
+            if reaction in reactions:
+                continue
+            pill = self._reaction_pills.pop(reaction)
+            if self._reactions_row is not None:
+                self._reactions_row.removeWidget(pill)
+            pill.deleteLater()
+
+        if self._reactions_row is None:
+            return
+
+        for reaction, count in reactions.items():
+            existing_pill = self._reaction_pills.get(reaction)
+            if existing_pill is None:
+                new_pill = ReactionPill(reaction, count)
+                self._reaction_pills[reaction] = new_pill
+                self._reactions_row.insertWidget(
+                    self._reactions_row.count() - 1,
+                    new_pill,
+                )
+                continue
+            existing_pill.set_count(count)
 
     def add_reaction(self, emoji: str, increment: int = 1) -> None:
         if self._reactions_row is None:
@@ -150,7 +230,7 @@ class ChatBubble(QFrame):
 
 class ChatPanel(QFrame):
     message_sent = Signal(str)
-    reaction_sent = Signal(str)
+    reaction_sent = Signal(int, str)
     file_sent = Signal(str)
 
     def __init__(self) -> None:
@@ -160,6 +240,8 @@ class ChatPanel(QFrame):
         self.setMaximumWidth(540)
         self.setAcceptDrops(True)
         self._message_cards: list[ChatBubble] = []
+        self._message_cards_by_id: dict[int, ChatBubble] = {}
+        self._selected_message_id: int | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -176,12 +258,14 @@ class ChatPanel(QFrame):
         header_layout.addWidget(title)
         header_layout.addStretch()
 
-        for emoji, label in REACTION_CHOICES:
-            button = QPushButton(emoji)
+        for reaction, label, _icon in REACTION_CHOICES:
+            button = QPushButton()
             button.setObjectName("quickReactionButton")
             button.setToolTip(label)
+            button.setIcon(reaction_icon(reaction))
+            button.setIconSize(QSize(28, 28))
             button.clicked.connect(
-                lambda _checked=False, value=emoji: self.reaction_sent.emit(value)
+                lambda _checked=False, value=reaction: self._send_reaction(value)
             )
             header_layout.addWidget(button)
 
@@ -233,31 +317,41 @@ class ChatPanel(QFrame):
 
     def seed_messages(self) -> None:
         self.add_message(
+            message_id=-1,
             author="User1",
             message="Hello everyone!",
             author_color="#65E7C6",
             is_host=True,
         )
-        self.add_message(author="User2", message="Hi there!", author_color="#C9BEFF")
         self.add_message(
+            message_id=-2,
+            author="User2",
+            message="Hi there!",
+            author_color="#C9BEFF",
+        )
+        self.add_message(
+            message_id=-3,
             author="User1",
             message="Ready to watch!",
             author_color="#65E7C6",
             is_host=True,
-            reactions=[("🔥", 3), ("👋", 1)],
+            reactions=[("🔥", 3), ("👏", 1)],
         )
         self.add_message(
+            message_id=-4,
             author="User4",
             message="Let's do this!",
             author_color="#FF9A6C",
             reactions=[("😂", 2)],
         )
         self.add_message(
+            message_id=-5,
             author="User3",
             message="Glad we picked this one",
             author_color="#8EC7FF",
         )
         self.add_message(
+            message_id=-6,
             author="User2",
             message="This scene is so good omg",
             author_color="#C9BEFF",
@@ -266,6 +360,7 @@ class ChatPanel(QFrame):
 
     def add_message(
         self,
+        message_id: int,
         author: str,
         message: str,
         author_color: str = "#E0BAD7",
@@ -273,7 +368,13 @@ class ChatPanel(QFrame):
         attachment: ChatAttachment | None = None,
         reactions: Sequence[tuple[str, int]] | None = None,
     ) -> None:
+        existing = self._message_cards_by_id.get(message_id)
+        if existing is not None:
+            existing.set_reactions(dict(reactions or ()))
+            return
+
         bubble = ChatBubble(
+            message_id=message_id,
             author=author,
             message=message,
             author_color=author_color,
@@ -281,15 +382,23 @@ class ChatPanel(QFrame):
             attachment=attachment,
             reactions=reactions,
         )
+        bubble.clicked.connect(self.select_message)
         self._message_cards.append(bubble)
+        self._message_cards_by_id[message_id] = bubble
         self._messages_layout.insertWidget(self._messages_layout.count() - 1, bubble)
+        if self._selected_message_id is None:
+            self.select_message(message_id)
         self._scroll_to_bottom()
 
-    def add_reaction_to_latest_message(self, emoji: str) -> None:
-        if not self._message_cards:
+    def select_message(self, message_id: int) -> None:
+        self._selected_message_id = message_id
+        for bubble in self._message_cards:
+            bubble.set_selected(bubble.message_id == message_id)
+
+    def _send_reaction(self, reaction: str) -> None:
+        if self._selected_message_id is None:
             return
-        self._message_cards[-1].add_reaction(emoji)
-        self._scroll_to_bottom()
+        self.reaction_sent.emit(self._selected_message_id, reaction)
 
     def clear_messages(self) -> None:
         while self._messages_layout.count() > 1:
@@ -300,6 +409,8 @@ class ChatPanel(QFrame):
             if widget is not None:
                 widget.deleteLater()
         self._message_cards.clear()
+        self._message_cards_by_id.clear()
+        self._selected_message_id = None
 
     def _send_message(self) -> None:
         message = self._message_input.text().strip()
@@ -314,7 +425,7 @@ class ChatPanel(QFrame):
             self,
             "Attach a file",
             "",
-            "Supported files (*.png *.jpg *.jpeg);;All files (*)",
+            "All files (*);;Images (*.png *.jpg *.jpeg)",
         )
         if file_path:
             self.file_sent.emit(file_path)

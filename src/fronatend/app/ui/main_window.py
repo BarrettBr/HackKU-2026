@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
@@ -72,7 +71,6 @@ class MainWindow(QMainWindow):
             "#6BF178",
             "#FC5130",
         )
-        self._avatar_choices = ("🦊", "🐸", "🐧", "🦝", "🐙", "🦉", "🐯", "🐳")
 
         self.setWindowTitle("Moovie Night")
         self.setMinimumSize(1260, 800)
@@ -525,14 +523,36 @@ class MainWindow(QMainWindow):
             return
         asyncio.create_task(self._send_file_async(self._room_target, file_path))
 
-    def _send_reaction(self, emoji: str) -> None:
-        self._chat_panel.add_reaction_to_latest_message(emoji)
+    def _send_reaction(self, message_id: int, reaction: str) -> None:
+        if self._room_target is None:
+            self.statusBar().showMessage("Join or create a room before reacting.", 2500)
+            return
+        asyncio.create_task(
+            self._send_reaction_async(self._room_target, message_id, reaction)
+        )
 
     async def _send_chat_message_async(self, target: JoinTarget, message: str) -> None:
         try:
             chat_message = await self._room_client.send_message(target, message)
         except Exception as error:
             self.statusBar().showMessage(f"Message failed: {error}", 3000)
+            return
+        self._append_chat_message(chat_message)
+
+    async def _send_reaction_async(
+        self,
+        target: JoinTarget,
+        message_id: int,
+        reaction: str,
+    ) -> None:
+        try:
+            chat_message = await self._room_client.send_reaction(
+                target=target,
+                message_id=message_id,
+                reaction=reaction,
+            )
+        except Exception as error:
+            self.statusBar().showMessage(f"Reaction failed: {error}", 3000)
             return
         self._append_chat_message(chat_message)
 
@@ -571,15 +591,15 @@ class MainWindow(QMainWindow):
             self._append_chat_message(message)
 
     def _append_chat_message(self, message: ChatMessage) -> None:
-        if message.id <= self._last_message_id:
-            return
-        self._last_message_id = message.id
+        self._last_message_id = max(self._last_message_id, message.id)
         self._chat_panel.add_message(
+            message_id=message.id,
             author=message.author,
             message=message.text,
             author_color=self._color_for_author(message.author),
             is_host=message.author == self._host_name(),
             attachment=message.attachment,
+            reactions=tuple(message.reactions.items()),
         )
 
     def _toggle_pause(self) -> None:
@@ -683,10 +703,18 @@ class MainWindow(QMainWindow):
         if avatar is not None:
             return avatar
 
-        digest = hashlib.sha256(participant.encode("utf-8")).digest()
-        avatar = self._avatar_choices[digest[0] % len(self._avatar_choices)]
+        avatar = self._initials_for(participant)
         self._author_avatars[participant] = avatar
         return avatar
+
+    def _initials_for(self, participant: str) -> str:
+        clean_name = participant.replace("(Host)", "").strip()
+        parts = [part for part in clean_name.split() if part]
+        if not parts:
+            return "?"
+        if len(parts) == 1:
+            return parts[0][:2].upper()
+        return "".join(part[0].upper() for part in parts[:2])
 
     def _install_mouse_tracking(self, widget: QObject | None) -> None:
         if widget is None:
@@ -829,6 +857,9 @@ class MainWindow(QMainWindow):
                 border-radius: 18px;
                 border: 1px solid rgba(255, 255, 255, 0.03);
             }
+            QFrame#chatBubble[selected="true"] {
+                border: 1px solid rgba(101, 231, 198, 0.85);
+            }
             QFrame#attachmentPreview {
                 background: rgba(255, 255, 255, 0.07);
                 border-radius: 14px;
@@ -923,8 +954,10 @@ class MainWindow(QMainWindow):
                 font-size: 14px;
                 font-weight: 700;
             }
-            QLabel#reactionEmoji,
-            QPushButton#quickReactionButton,
+            QLabel#reactionIcon {
+                min-width: 20px;
+                min-height: 20px;
+            }
             QPushButton#avatarChip {
                 font-family: "Apple Color Emoji", "Noto Color Emoji", "Segoe UI Emoji", "Twemoji Mozilla", sans-serif;
             }
@@ -980,7 +1013,15 @@ class MainWindow(QMainWindow):
                 min-height: 52px;
                 border-radius: 18px;
                 padding: 0px;
-                font-size: 24px;
+            }
+            QPushButton#downloadButton {
+                background: rgba(255, 255, 255, 0.08);
+                color: #ffffff;
+                border: none;
+                border-radius: 10px;
+                padding: 8px 12px;
+                font-size: 12px;
+                font-weight: 800;
             }
             QPushButton#primaryButton {
                 min-width: 120px;

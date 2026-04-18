@@ -7,7 +7,7 @@ import mimetypes
 from pathlib import Path
 import secrets
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -53,6 +53,7 @@ class ChatMessage:
     author: str
     text: str
     attachment: ChatAttachment | None = None
+    reactions: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,8 @@ class RoomHostService:
             status, payload = self._handle_get_messages(path)
         elif method == "POST" and path == "/messages":
             status, payload = self._handle_post_message(body)
+        elif method == "POST" and path == "/reactions":
+            status, payload = self._handle_post_reaction(body)
         elif method == "POST" and path == "/playback":
             status, payload = self._handle_playback(body)
         elif method == "GET" and path == "/health":
@@ -214,11 +217,8 @@ class RoomHostService:
 
         return 200, {
             "ok": True,
-            "messages": [
-                _message_payload(message)
-                for message in self._messages
-                if message.id > after
-            ],
+            # Return the full feed so reaction changes on older messages sync too.
+            "messages": [_message_payload(message) for message in self._messages],
             "room": self._room_payload(),
         }
 
@@ -256,6 +256,39 @@ class RoomHostService:
             "message": _message_payload(message),
             "room": self._room_payload(),
         }
+
+    def _handle_post_reaction(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        if self.room is None:
+            return 503, {"ok": False, "error": "room is not active"}
+
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return 400, {"ok": False, "error": "invalid JSON"}
+
+        if data.get("room_id") != self.room.room_id:
+            return 404, {"ok": False, "error": "room ID does not match this host"}
+
+        message_id = int(data.get("message_id") or 0)
+        reaction = str(data.get("reaction") or "").strip()
+        if not reaction:
+            return 400, {"ok": False, "error": "reaction cannot be empty"}
+
+        for index, message in enumerate(self._messages):
+            if message.id != message_id:
+                continue
+
+            reactions = dict(message.reactions)
+            reactions[reaction] = reactions.get(reaction, 0) + 1
+            updated_message = replace(message, reactions=reactions)
+            self._messages[index] = updated_message
+            return 200, {
+                "ok": True,
+                "message": _message_payload(updated_message),
+                "room": self._room_payload(),
+            }
+
+        return 404, {"ok": False, "error": "message not found"}
 
     def _handle_playback(self, body: bytes) -> tuple[int, dict[str, Any]]:
         if self.room is None:
@@ -358,6 +391,26 @@ class RoomClient:
 
         return chat_message_from_payload(payload["message"])
 
+    async def send_reaction(
+        self,
+        target: JoinTarget,
+        message_id: int,
+        reaction: str,
+    ) -> ChatMessage:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/reactions",
+                json={
+                    "room_id": target.room_id,
+                    "message_id": message_id,
+                    "reaction": reaction,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return chat_message_from_payload(payload["message"])
+
     async def update_playback(self, target: JoinTarget, is_paused: bool) -> RoomInfo:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
@@ -409,6 +462,10 @@ def chat_message_from_payload(message: dict[str, Any]) -> ChatMessage:
         author=str(message["author"]),
         text=str(message["text"]),
         attachment=_attachment_from_payload(message.get("attachment")),
+        reactions={
+            str(reaction): int(count)
+            for reaction, count in dict(message.get("reactions") or {}).items()
+        },
     )
 
 
@@ -489,6 +546,7 @@ def _message_payload(message: ChatMessage) -> dict[str, Any]:
             if message.attachment is not None
             else None
         ),
+        "reactions": message.reactions,
     }
 
 
