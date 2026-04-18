@@ -95,6 +95,8 @@ class ComposerInput(QTextEdit):
         self.setAcceptRichText(False)
         self.setMinimumHeight(46)
         self.setMaximumHeight(118)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.textChanged.connect(self._fit_to_text)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]

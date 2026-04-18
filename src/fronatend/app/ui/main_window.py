@@ -81,7 +81,7 @@ class MainWindow(QMainWindow):
         )
 
         self.setWindowTitle("Moovie Night")
-        self.setMinimumSize(1260, 800)
+        self.setMinimumSize(1000, 620)
         self.setMouseTracking(True)
 
         self._status_timer = QTimer(self)
@@ -753,10 +753,9 @@ class MainWindow(QMainWindow):
         try:
             movie = await self._movie_info_service.search(query)
         except Exception as error:
-            self._movie_info_title.setText("Movie info endpoint is not connected yet.")
+            self._movie_info_title.setText("Movie lookup failed.")
             self._movie_info_plot.setText(
-                "Wire the backend to GET /movies/search?q=<title> and return "
-                "title/year/plot/actors/rating. "
+                "The title was not changed because the lookup failed. "
                 f"Current error: {error}"
             )
             self._movie_info_cast.setText("")
@@ -933,7 +932,7 @@ class MainWindow(QMainWindow):
             }
             QFrame#shell {
                 background: #121224;
-                border-radius: 30px;
+                border-radius: 0px;
             }
             QFrame#videoColumn {
                 background: #0a0914;
@@ -945,14 +944,10 @@ class MainWindow(QMainWindow):
                 background: #17172c;
             }
             QFrame#topBar {
-                border-top-left-radius: 30px;
-                border-top-right-radius: 30px;
                 border-bottom: 1px solid rgba(255, 255, 255, 0.08);
             }
             QFrame#bottomBar {
                 border-top: 1px solid rgba(255, 255, 255, 0.08);
-                border-bottom-left-radius: 30px;
-                border-bottom-right-radius: 30px;
             }
             QFrame#videoSurface {
                 background: #0a0914;
@@ -1228,6 +1223,11 @@ class MainWindow(QMainWindow):
                 padding: 10px 14px;
                 font-size: 15px;
                 font-weight: 600;
+            }
+            QTextEdit#messageInput QScrollBar {
+                width: 0px;
+                height: 0px;
+                background: transparent;
             }
             QLineEdit#movieSearchInput {
                 background: #232339;
