@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication
 from qasync import QEventLoop
 
 if __package__ in {None, ""}:
-    sys.path.append(str(Path(__file__).resolve().parents[2]))
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.config import get_settings
 from app.services.api_client import ApiClient
