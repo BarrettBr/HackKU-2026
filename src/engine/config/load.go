@@ -1,22 +1,19 @@
 package config
 
-import (
-	"log"
-
-	"github.com/pion/webrtc/v4"
-)
+import "github.com/pion/webrtc/v4"
 
 type Transmitter struct {
 	PixelWidth  int
 	PixelHeight int
-	FrameRate int
-	StreamName string
+	FrameRate   int
+	StreamName  string
 }
 
 type Receiver struct {
-}
-
-type Registrar struct {
+	Codec       string
+	Width       int
+	Height      int
+	PixelFormat string // Raw decoded output format for shared memory
 }
 
 type Config struct {
@@ -24,16 +21,10 @@ type Config struct {
 	Rtc_Conf *webrtc.Configuration
 	Transmitter
 	Receiver
-	Registrar
 }
 
 func Load() (*Config, error) {
-	appCfg, err := loadSettings()
-	if err != nil {
-		log.Fatalf("Error building config: %v", err)
-	}
-
-	return appCfg, nil
+	return loadSettings() // Seperated out for os detection / codec extension later down the line
 }
 
 func loadSettings() (*Config, error) {
@@ -49,10 +40,14 @@ func loadSettings() (*Config, error) {
 		Transmitter{
 			PixelWidth:  600,
 			PixelHeight: 600,
-			FrameRate: 30,
-			StreamName: "screen-capture",
+			FrameRate:   30,
+			StreamName:  "screen-capture",
 		},
-		Receiver{},
-		Registrar{},
+		Receiver{
+			Codec:       "h264",
+			Width:       600,
+			Height:      600,
+			PixelFormat: "yuv420p",
+		},
 	}, nil
 }

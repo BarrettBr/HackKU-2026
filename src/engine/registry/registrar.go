@@ -14,7 +14,7 @@ type Runnable interface {
 }
 
 type Registry struct {
-	transmitter *transmitter.Service
+	transmitter Runnable
 	receiver    Runnable
 }
 
@@ -23,12 +23,12 @@ func New(cfg *config.Config) (*Registry, error) {
 		return nil, fmt.Errorf("config is nil")
 	}
 
-	tx, err := transmitter.New(cfg.Transmitter)
+	tx, err := transmitter.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create transmitter: %w", err)
 	}
 
-	rx, err := receiver.New(cfg.Receiver)
+	rx, err := receiver.New(&cfg.Receiver)
 	if err != nil {
 		return nil, fmt.Errorf("create receiver: %w", err)
 	}
@@ -39,8 +39,8 @@ func New(cfg *config.Config) (*Registry, error) {
 	}, nil
 }
 
-func (r *Registry) Run(cfg *config.Config) error {
-	if err := r.transmitter.Run(cfg); err != nil {
+func (r *Registry) Run() error {
+	if err := r.transmitter.Run(); err != nil {
 		return fmt.Errorf("run transmitter: %w", err)
 	}
 

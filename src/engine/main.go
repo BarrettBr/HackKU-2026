@@ -18,7 +18,7 @@ func main() {
 		log.Fatalf("Error creating registry: %v", err)
 	}
 
-	if err := appRegistry.Run(appCfg); err != nil {
+	if err := appRegistry.Run(); err != nil {
 		log.Fatalf("Error running registry: %v", err)
 	}
 }
