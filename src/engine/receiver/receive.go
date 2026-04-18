@@ -1,5 +1,7 @@
 package receiver
 
-func New() {
-	return
+import "github.com/BarrettBr/HackKU-2026/config"
+
+func New() config.Receiver {
+	return config.Receiver{}
 }
