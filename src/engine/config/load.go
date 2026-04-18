@@ -6,6 +6,9 @@ type Transmitter struct {
 	PixelWidth  int
 	PixelHeight int
 	FrameRate   int
+	Codec string
+	FfmpegQuality string
+	PixelFormat string
 	StreamName  string
 }
 
@@ -41,7 +44,10 @@ func loadSettings() (*Config, error) {
 			PixelWidth:  600,
 			PixelHeight: 600,
 			FrameRate:   30,
+			FfmpegQuality: "fast",
 			StreamName:  "screen-capture",
+			PixelFormat: "RGBA",
+			Codec: "h264",
 		},
 		Receiver{
 			Codec:       "h264",

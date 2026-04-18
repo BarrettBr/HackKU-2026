@@ -154,19 +154,12 @@ import (
 	"github.com/BarrettBr/HackKU-2026/config"
 )
 
-type PixelFormat uint8
 
 const (
 	FormatUnknown PixelFormat = 0
 	FormatBGRx    PixelFormat = 1
 	FormatRGBA    PixelFormat = 2
 )
-
-type Frame struct {
-	Data          []byte
-	Width, Height int
-	Format        PixelFormat
-}
 
 type ScreenStream interface {
 	Frames() <-chan Frame
@@ -215,10 +208,7 @@ func NewStream(cfg *config.Config) (ScreenStream, error) {
 	}
 	s.data = d
 
-	buf := cfg.FrameRate / 2
-	if buf < 4 {
-		buf = 4
-	}
+	buf := max(cfg.FrameRate / 2, 4)
 	s.frames = make(chan Frame, buf)
 
 	s.wg.Add(1)
