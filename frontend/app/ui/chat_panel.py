@@ -20,7 +20,6 @@ class ReactionPill(QFrame):
     def __init__(self, emoji: str, count: int) -> None:
         super().__init__()
         self.setObjectName("reactionPill")
-        self.emoji = emoji
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 7, 12, 7)
@@ -185,11 +184,7 @@ class ChatPanel(QFrame):
             author_color="#65E7C6",
             is_host=True,
         )
-        self.add_message(
-            author="User2",
-            message="Hi there!",
-            author_color="#C9BEFF",
-        )
+        self.add_message(author="User2", message="Hi there!", author_color="#C9BEFF")
         self.add_message(
             author="User1",
             message="Ready to watch!",
@@ -237,7 +232,6 @@ class ChatPanel(QFrame):
     def add_reaction_to_latest_message(self, emoji: str) -> None:
         if not self._message_cards:
             return
-
         self._message_cards[-1].add_reaction(emoji)
         self._scroll_to_bottom()
 

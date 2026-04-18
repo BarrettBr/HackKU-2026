@@ -47,12 +47,6 @@ Defaults:
 python frontend/app/main.py
 ```
 
-Or use:
-
-```bash
-make run
-```
-
 The starter UI includes:
 
 - a central video placeholder panel
@@ -87,15 +81,3 @@ Suggested first-run flow in VS Code:
 4. Run the task `Python: Install frontend deps`.
 5. Copy `.env.example` to `.env`.
 6. Start the app with the `Run Moovie Night Frontend` launch config or the `Frontend: Run app` task.
-
-## Quick Commands
-
-Use the project `Makefile` for the common frontend workflow:
-
-```bash
-make deps
-make env
-make run
-```
-
-There is also a short run guide in `RUNNING.md`.

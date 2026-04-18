@@ -21,7 +21,7 @@ deps: $(DEPS_STAMP)
 env: $(ENV_FILE)
 
 run: deps env
-	$(VENV_PYTHON) frontend/app/main.py
+	PYTHONPATH=frontend $(VENV_PYTHON) frontend/app/main.py
 
 check: typecheck test
 

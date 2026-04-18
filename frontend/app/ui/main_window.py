@@ -40,7 +40,6 @@ class MainWindow(QMainWindow):
         self.ws_client = ws_client
         self.chat_open = True
         self.is_paused = False
-        self.unread_count = 0
         self._user_list_dialog: UserListDialog | None = None
 
         self.setWindowTitle("Moovie Night")
@@ -51,6 +50,7 @@ class MainWindow(QMainWindow):
         self._status_timer.setSingleShot(True)
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._clear_status_text)
+
         self._chrome_timer = QTimer(self)
         self._chrome_timer.setInterval(1800)
         self._chrome_timer.timeout.connect(self._hide_chrome)
@@ -79,7 +79,6 @@ class MainWindow(QMainWindow):
         shell_layout.addWidget(self._top_bar)
 
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._splitter.setObjectName("contentSplitter")
         self._splitter.setChildrenCollapsible(False)
         shell_layout.addWidget(self._splitter, 1)
 
@@ -209,7 +208,6 @@ class MainWindow(QMainWindow):
 
         volume_button = QPushButton("🔊")
         volume_button.setObjectName("iconButton")
-        volume_button.setToolTip("Volume")
         layout.addWidget(volume_button)
 
         leave_button = QPushButton("Leave")
@@ -219,18 +217,10 @@ class MainWindow(QMainWindow):
         return frame
 
     def _handle_local_message(self, message: str) -> None:
-        self._chat_panel.add_message(
-            author="You",
-            message=message,
-            author_color="#E0BAD7",
-        )
-        if not self.chat_open:
-            self.unread_count += 1
+        self._chat_panel.add_message("You", message, author_color="#E0BAD7")
 
     def _send_reaction(self, emoji: str) -> None:
         self._chat_panel.add_reaction_to_latest_message(emoji)
-        if not self.chat_open:
-            self.unread_count += 1
 
     def _toggle_pause(self) -> None:
         self.is_paused = not self.is_paused
@@ -284,12 +274,6 @@ class MainWindow(QMainWindow):
             "Leaving room would end the session for everyone.", 3000
         )
 
-    def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if event.key() == Qt.Key.Key_Space:
-            self._toggle_pause()
-            return
-        super().keyPressEvent(event)
-
     def _install_mouse_tracking(self, widget: QObject | None) -> None:
         if widget is None:
             return
@@ -305,6 +289,12 @@ class MainWindow(QMainWindow):
         if event.type() in {QEvent.Type.MouseMove, QEvent.Type.Enter}:
             self._show_chrome()
         return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.key() == Qt.Key.Key_Space:
+            self._toggle_pause()
+            return
+        super().keyPressEvent(event)
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -343,7 +333,6 @@ class MainWindow(QMainWindow):
             QFrame#videoSurface {
                 background: #0a0914;
                 border-right: 1px solid rgba(255, 255, 255, 0.08);
-                border-bottom-left-radius: 0px;
             }
             QFrame#chatPanel {
                 background: #17172c;
@@ -455,7 +444,6 @@ class MainWindow(QMainWindow):
             QPushButton#leaveButton {
                 background: transparent;
                 border-color: transparent;
-                box-shadow: none;
             }
             QPushButton#ghostButton:hover,
             QToolButton#menuButton:hover,
