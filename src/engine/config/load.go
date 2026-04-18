@@ -38,7 +38,7 @@ func Load() (*Config, error) {
 
 func loadSettings() (*Config, error) {
 	return &Config{
-		"Wayland",
+		"linux-wayland",
 		&webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
 				{
