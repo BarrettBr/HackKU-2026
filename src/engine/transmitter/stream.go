@@ -3,10 +3,6 @@ package transmitter
 import (
 	"errors"
 	"log"
-	"os"
-    "os/signal"
-    "syscall"
-
 
 	"github.com/BarrettBr/HackKU-2026/config"
 	"github.com/BarrettBr/HackKU-2026/transmitter/recording"
@@ -14,7 +10,8 @@ import (
 
 func NewRecording(appCfg *config.Config) (error){
 	// Init stage
-	if appCfg.OS == "linux-wayland"{
+	switch appCfg.OS{
+	case "linux-wayland":
 		cfg, err := config.Load()
 		if err != nil {
 			log.Fatal(err)
@@ -28,24 +25,10 @@ func NewRecording(appCfg *config.Config) (error){
 		}
 		defer stream.Stop()
 
-		// Ctrl-C = clean shutdown
-		sigs := make(chan os.Signal, 1)
-		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-		go func() { <-sigs; stream.Stop() }()
-
-		for f := range stream.Frames() {
-			log.Printf("frame %dx%d %s %d bytes", f.Width, f.Height, f.Format, len(f.Data))
-			// hand f.Data off to your encoder here
-		}
-
-		if err := stream.Err(); err != nil {
-			log.Fatal(err)
-			return err
-		}
 		return nil
-	} else if appCfg.OS =="mac"{
+	case "mac":
 		return nil
-	} else {
+	default:
 		log.Print("OS not supported for screen sharing")
 		return errors.New("OS not supported")
 	}
