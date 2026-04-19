@@ -22,16 +22,19 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.api_client import ApiClient
+from app.services.ipc_video_consumer import IPCVideoConsumer
 from app.services.movie_info_service import MovieInfo, MovieInfoService
 from app.services.room_service import (
     ChatAttachment,
     ChatMessage,
+    EngineRuntimeClient,
     JoinTarget,
     RoomClient,
     RoomHostService,
     RoomInfo,
     RoomMovieInfo,
     RoomSubtitleInfo,
+    WatcherSubscription,
     parse_join_target,
 )
 from app.services.subtitle_service import load_srt_file, search_opensubtitles_srt
@@ -75,7 +78,9 @@ class MainWindow(QMainWindow):
         self._current_subtitles: RoomSubtitleInfo | None = None
         self._room_host = RoomHostService(display_name=self.state.display_name)
         self._room_client = RoomClient(display_name=self.state.display_name)
+        self._engine_runtime = EngineRuntimeClient()
         self._room_target: JoinTarget | None = None
+        self._ipc_consumer: IPCVideoConsumer | None = None
         self._last_message_id = 0
         self._author_colors: dict[str, str] = {}
         self._author_avatars: dict[str, str] = {}
@@ -106,6 +111,9 @@ class MainWindow(QMainWindow):
         self._room_poll_timer = QTimer(self)
         self._room_poll_timer.setInterval(900)
         self._room_poll_timer.timeout.connect(self._poll_room)
+        self._video_frame_timer = QTimer(self)
+        self._video_frame_timer.setInterval(33)
+        self._video_frame_timer.timeout.connect(self._pump_video_frame)
 
         self._build_ui()
         self._apply_styles()
@@ -353,6 +361,14 @@ class MainWindow(QMainWindow):
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_label.setObjectName("videoStatus")
         layout.addWidget(self._status_label)
+
+        self._video_frame_label = QLabel("")
+        self._video_frame_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._video_frame_label.setObjectName("videoFrame")
+        self._video_frame_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        layout.addWidget(self._video_frame_label, 1)
         layout.addStretch()
         return surface
 
@@ -467,6 +483,8 @@ class MainWindow(QMainWindow):
     async def _create_room_async(self) -> None:
         room_name = self._room_name_input.text().strip() or "Friday Movie Room"
         self._landing_status.setText("Creating room and opening P2P join listener...")
+        self._stop_video_consumer()
+        await self._try_unsubscribe_engine_runtime(self._room_target)
         try:
             room = await self._room_host.start_room(room_name)
         except OSError as error:
@@ -486,12 +504,19 @@ class MainWindow(QMainWindow):
         try:
             target = parse_join_target(invite)
             room = await self._room_client.join(invite)
+            subscription = await self._engine_runtime.subscribe_watcher(target)
         except Exception as error:
             self._landing_status.setText(f"Could not join room: {error}")
+            if "target" in locals():
+                try:
+                    await self._room_client.leave(target)
+                except Exception:
+                    pass
             return
 
         self._apply_room_info(room=room, is_host=False)
         self._room_target = target
+        self._start_video_consumer(subscription)
         self._landing_status.setText(f"Connected to {room.room_name}.")
         self._show_room()
 
@@ -979,10 +1004,14 @@ class MainWindow(QMainWindow):
         )
 
     def _leave_room(self) -> None:
+        target = self._room_target
         if self.state.is_host:
             asyncio.create_task(self._room_host.stop())
-        elif self._room_target is not None:
-            asyncio.create_task(self._leave_room_async(self._room_target))
+        elif target is not None:
+            asyncio.create_task(self._leave_room_async(target))
+        if target is not None:
+            asyncio.create_task(self._try_unsubscribe_engine_runtime(target))
+        self._stop_video_consumer()
         self._room_poll_timer.stop()
         self._room_target = None
         self._show_landing()
@@ -994,6 +1023,54 @@ class MainWindow(QMainWindow):
         except Exception:
             # Leaving should never trap someone in the local UI.
             pass
+
+    async def _try_unsubscribe_engine_runtime(self, target: JoinTarget | None) -> None:
+        if target is None:
+            return
+        try:
+            await self._engine_runtime.unsubscribe(target)
+        except Exception:
+            # Engine may not be running yet; local UI flow should continue.
+            pass
+
+    def _start_video_consumer(self, subscription: WatcherSubscription) -> None:
+        self._stop_video_consumer()
+        if not subscription.ipc_path:
+            self._status_label.setText("Waiting for stream...")
+            return
+        try:
+            consumer = IPCVideoConsumer(subscription.ipc_path)
+            consumer.open()
+            self._ipc_consumer = consumer
+            self._status_label.setText("Waiting for first video frame...")
+            self._video_frame_timer.start()
+        except Exception as error:
+            self._status_label.setText(f"Video init failed: {error}")
+
+    def _stop_video_consumer(self) -> None:
+        self._video_frame_timer.stop()
+        if self._ipc_consumer is not None:
+            self._ipc_consumer.close()
+            self._ipc_consumer = None
+        if hasattr(self, "_video_frame_label"):
+            self._video_frame_label.clear()
+        if hasattr(self, "_status_label"):
+            self._status_label.setText("")
+
+    def _pump_video_frame(self) -> None:
+        if self._ipc_consumer is None:
+            return
+        pixmap = self._ipc_consumer.read_latest_pixmap()
+        if pixmap is None:
+            return
+        self._status_label.setText("")
+        self._video_frame_label.setPixmap(
+            pixmap.scaled(
+                self._video_frame_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
     def _host_name(self) -> str:
         return self.state.participants[0] if self.state.participants else ""
@@ -1051,8 +1128,7 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            """
+        self.setStyleSheet("""
             QWidget {
                 color: #ffffff;
                 font-family: "SF Pro Display", "Helvetica Neue", sans-serif;
@@ -1467,5 +1543,4 @@ class MainWindow(QMainWindow):
                 background: #141626;
                 color: #e0bad7;
             }
-            """
-        )
+            """)

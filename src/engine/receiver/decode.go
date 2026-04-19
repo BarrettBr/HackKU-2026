@@ -1,11 +1,14 @@
 package receiver
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 type EncodedFrame struct {
@@ -31,6 +34,8 @@ type Decoder interface {
 	Close() error
 }
 
+var ErrNoFrameReady = errors.New("decoder frame not ready")
+
 func newDecoder(cfg decoderConfig) (Decoder, error) {
 	return newFFmpegDecoder(cfg)
 }
@@ -39,9 +44,11 @@ type ffmpegDecoder struct {
 	cfg       decoderConfig
 	frameSize int
 
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	stdoutFile *os.File
+	rawBuffer  []byte
 
 	mu sync.Mutex
 }
@@ -75,14 +82,19 @@ func newFFmpegDecoder(cfg decoderConfig) (*ffmpegDecoder, error) {
 func (d *ffmpegDecoder) start() error {
 	args := []string{
 		"-loglevel", "error",
-		"-fflags", "nobuffer",
-		"-flags", "low_delay",
+	}
+	if strings.EqualFold(d.cfg.Codec, "h264") || strings.TrimSpace(d.cfg.Codec) == "" {
+		// Force FFmpeg's native decoder to avoid libopenh264 decode failures on
+		// some distro builds.
+		args = append(args, "-c:v", "h264")
+	}
+	args = append(args,
 		"-f", strings.ToLower(d.cfg.Codec),
 		"-i", "pipe:0",
 		"-f", "rawvideo",
 		"-pix_fmt", d.cfg.PixelFormat,
 		"pipe:1",
-	}
+	)
 
 	d.cmd = exec.Command("ffmpeg", args...)
 
@@ -100,6 +112,9 @@ func (d *ffmpegDecoder) start() error {
 
 	d.stdin = stdin
 	d.stdout = stdout
+	if file, ok := stdout.(*os.File); ok {
+		d.stdoutFile = file
+	}
 	return nil
 }
 
@@ -111,10 +126,39 @@ func (d *ffmpegDecoder) Decode(frame EncodedFrame) (DecodedFrame, error) {
 		return DecodedFrame{}, err
 	}
 
-	buf := make([]byte, d.frameSize)
-	if _, err := io.ReadFull(d.stdout, buf); err != nil {
-		return DecodedFrame{}, err
+	tmp := make([]byte, 128*1024)
+	for len(d.rawBuffer) < d.frameSize {
+		if d.stdoutFile != nil {
+			_ = d.stdoutFile.SetReadDeadline(time.Now().Add(75 * time.Millisecond))
+		}
+		n, err := d.stdout.Read(tmp)
+		if d.stdoutFile != nil {
+			_ = d.stdoutFile.SetReadDeadline(time.Time{})
+		}
+		if n > 0 {
+			d.rawBuffer = append(d.rawBuffer, tmp[:n]...)
+		}
+		if err != nil {
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) && errors.Is(pathErr.Err, os.ErrDeadlineExceeded) {
+				return DecodedFrame{}, ErrNoFrameReady
+			}
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				return DecodedFrame{}, ErrNoFrameReady
+			}
+			if err == io.EOF {
+				return DecodedFrame{}, ErrNoFrameReady
+			}
+			return DecodedFrame{}, err
+		}
+		if n == 0 {
+			return DecodedFrame{}, ErrNoFrameReady
+		}
 	}
+
+	buf := make([]byte, d.frameSize)
+	copy(buf, d.rawBuffer[:d.frameSize])
+	d.rawBuffer = d.rawBuffer[d.frameSize:]
 
 	return DecodedFrame{
 		Data:   buf,

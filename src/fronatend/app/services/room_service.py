@@ -59,6 +59,14 @@ class RoomSubtitleInfo:
 
 
 @dataclass(frozen=True)
+class WatcherSubscription:
+    ipc_path: str
+    width: int
+    height: int
+    pixel_format: str
+
+
+@dataclass(frozen=True)
 class ChatAttachment:
     filename: str
     mime_type: str
@@ -186,6 +194,8 @@ class RoomHostService:
             status, payload = self._handle_movie(body)
         elif method == "POST" and path == "/subtitles":
             status, payload = self._handle_subtitles(body)
+        elif method == "POST" and path == "/webrtc/offer":
+            status, payload = self._handle_webrtc_offer(body)
         elif method == "GET" and path == "/health":
             status = 200
             payload = {"ok": True}
@@ -237,15 +247,11 @@ class RoomHostService:
         return 200, {"ok": True, "room": self._room_payload()}
 
     def _handle_get_messages(self, path: str) -> tuple[int, dict[str, Any]]:
-        after = 0
-        parsed = urlparse(path)
-        params = parse_qs(parsed.query)
-        if "after" in params:
-            after = int(params["after"][0])
-
+        # Keep endpoint signature stable; return full feed so reaction updates
+        # on older messages stay in sync for all clients.
+        _ = path
         return 200, {
             "ok": True,
-            # Return the full feed so reaction changes on older messages sync too.
             "messages": [_message_payload(message) for message in self._messages],
             "room": self._room_payload(),
         }
@@ -353,6 +359,41 @@ class RoomHostService:
         self._movie = movie
         self.room.movie = movie
         return 200, {"ok": True, "room": self._room_payload()}
+
+    def _handle_webrtc_offer(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        if self.room is None:
+            return 503, {"ok": False, "error": "room is not active"}
+
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return 400, {"ok": False, "error": "invalid JSON"}
+
+        if data.get("room_code") != self.room.room_id:
+            return 404, {"ok": False, "error": "room code does not match this host"}
+
+        offer_type = str(data.get("type") or "offer")
+        sdp = str(data.get("sdp") or "")
+        if not sdp:
+            return 400, {"ok": False, "error": "missing SDP"}
+
+        engine_url = f"http://{self.room.host}:8080/offer"
+        try:
+            response = httpx.post(
+                engine_url,
+                json={
+                    "room_code": self.room.room_id,
+                    "type": offer_type,
+                    "sdp": sdp,
+                },
+                timeout=8.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as error:
+            return 503, {"ok": False, "error": f"engine offer exchange failed: {error}"}
+
+        return 200, payload
 
     def _handle_subtitles(self, body: bytes) -> tuple[int, dict[str, Any]]:
         if self.room is None:
@@ -568,6 +609,42 @@ class RoomClient:
         return room_info_from_payload(payload["room"]), [
             chat_message_from_payload(message) for message in payload["messages"]
         ]
+
+
+class EngineRuntimeClient:
+    def __init__(self, engine_api_port: int = 8080) -> None:
+        self.engine_api_port = engine_api_port
+
+    def _base_url(self, target: JoinTarget) -> str:
+        return f"http://{target.host}:{self.engine_api_port}"
+
+    async def subscribe_watcher(self, target: JoinTarget) -> WatcherSubscription:
+        signaling_url = f"http://{target.host}:{target.port}/webrtc/offer"
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.post(
+                f"{self._base_url(target)}/subscribe",
+                json={
+                    "room_code": target.room_id,
+                    "signaling_url": signaling_url,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        subscription = payload.get("subscription") or {}
+        return WatcherSubscription(
+            ipc_path=str(subscription.get("ipc_path") or ""),
+            width=int(subscription.get("width") or 0),
+            height=int(subscription.get("height") or 0),
+            pixel_format=str(subscription.get("pixel_format") or ""),
+        )
+
+    async def unsubscribe(self, target: JoinTarget) -> None:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{self._base_url(target)}/unsubscribe", json={}
+            )
+            response.raise_for_status()
 
 
 def room_info_from_payload(room_payload: dict[str, Any]) -> RoomInfo:

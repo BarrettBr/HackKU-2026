@@ -1,10 +1,13 @@
-.PHONY: deps env run check format typecheck test clean
+.PHONY: deps env run frontend backend dev stop-backend check format typecheck test clean
 
 PYTHON ?= python3
 VENV_DIR ?= .venv
 VENV_PYTHON ?= $(VENV_DIR)/bin/python
 ENV_FILE ?= .env
 DEPS_STAMP ?= $(VENV_DIR)/.fronatend-deps-stamp
+ENGINE_DIR ?= src/engine
+PIPEWIRE_AVAILABLE := $(shell pkg-config --exists libpipewire-0.3 && echo 1 || echo 0)
+ENGINE_GO_TAGS ?= $(if $(filter 1,$(PIPEWIRE_AVAILABLE)),pipewire,)
 
 $(VENV_PYTHON):
 	$(PYTHON) -m venv $(VENV_DIR)
@@ -22,8 +25,48 @@ deps: $(DEPS_STAMP)
 
 env: $(ENV_FILE)
 
-run: deps env
+frontend: deps env
 	PYTHONPATH=src/fronatend $(VENV_PYTHON) src/fronatend/app/main.py
+
+run: frontend
+
+backend:
+	@echo "Starting backend (ENGINE_GO_TAGS='$(ENGINE_GO_TAGS)')"
+	cd $(ENGINE_DIR) && go run $(if $(ENGINE_GO_TAGS),-tags '$(ENGINE_GO_TAGS)',) .
+
+dev: deps env
+	@set -eu; \
+	echo "Starting dev stack (ENGINE_GO_TAGS='$(ENGINE_GO_TAGS)')"; \
+	if ss -ltn '( sport = :8080 )' | grep -q ':8080'; then \
+		echo "Port 8080 is already in use. Run 'make stop-backend' first."; \
+		exit 1; \
+	fi; \
+	BACKEND_PID=""; \
+	cleanup() { \
+		if [ -n "$$BACKEND_PID" ] && kill -0 "$$BACKEND_PID" 2>/dev/null; then \
+			kill -TERM -- "-$$BACKEND_PID" 2>/dev/null || kill -TERM "$$BACKEND_PID" 2>/dev/null || true; \
+			wait "$$BACKEND_PID" 2>/dev/null || true; \
+		fi; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	setsid sh -c "cd $(ENGINE_DIR) && exec go run $(if $(ENGINE_GO_TAGS),-tags $(ENGINE_GO_TAGS),) ." & \
+	BACKEND_PID=$$!; \
+	sleep 1; \
+	if ! kill -0 "$$BACKEND_PID" 2>/dev/null; then \
+		echo "Backend exited during startup."; \
+		exit 1; \
+	fi; \
+	PYTHONPATH=src/fronatend $(VENV_PYTHON) src/fronatend/app/main.py
+
+stop-backend:
+	@set -eu; \
+	PIDS=$$(ss -ltnp '( sport = :8080 )' 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true); \
+	if [ -z "$$PIDS" ]; then \
+		echo "No backend process is listening on :8080."; \
+		exit 0; \
+	fi; \
+	echo "Stopping backend pids: $$PIDS"; \
+	kill $$PIDS 2>/dev/null || true
 
 check: typecheck test
 

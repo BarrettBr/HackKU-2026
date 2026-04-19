@@ -3,13 +3,13 @@ package config
 import "github.com/pion/webrtc/v4"
 
 type Transmitter struct {
-	PixelWidth  int
-	PixelHeight int
-	FrameRate   int
-	Codec string
+	PixelWidth    int
+	PixelHeight   int
+	FrameRate     int
+	Codec         string
 	FfmpegQuality string
-	PixelFormat string
-	StreamName  string
+	PixelFormat   string
+	StreamName    string
 }
 
 type Receiver struct {
@@ -41,19 +41,19 @@ func loadSettings() (*Config, error) {
 			},
 		},
 		Transmitter{
-			PixelWidth:  600,
-			PixelHeight: 600,
-			FrameRate:   30,
+			PixelWidth:    0,
+			PixelHeight:   0,
+			FrameRate:     30,
 			FfmpegQuality: "fast",
-			StreamName:  "screen-capture",
-			PixelFormat: "RGBA",
-			Codec: "h264",
+			StreamName:    "screen-capture",
+			PixelFormat:   "RGBA",
+			Codec:         "h264",
 		},
 		Receiver{
 			Codec:       "h264",
-			Width:       600,
-			Height:      600,
-			PixelFormat: "yuv420p",
+			Width:       0,
+			Height:      0,
+			PixelFormat: "rgba",
 		},
 	}, nil
 }

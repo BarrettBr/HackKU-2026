@@ -1,3 +1,5 @@
+//go:build linux && cgo && pipewire
+
 package recording
 
 /*
@@ -7,7 +9,7 @@ package recording
 #include <stdint.h>
 #include <stdlib.h>
 
-extern void goOnFrame(uintptr_t h, void *data, int size, int w, int h_px, int fmt);
+extern void goOnFrame(uintptr_t h, void *data, int size, int w, int h_px, int fmt, int stride);
 extern void goOnStreamError(uintptr_t h, char *msg);
 
 struct capture_data {
@@ -33,12 +35,18 @@ static void on_process(void *userdata) {
 	struct pw_buffer *b = pw_stream_dequeue_buffer(d->stream);
 	if (!b) return;
 	struct spa_buffer *buf = b->buffer;
-	if (buf->datas[0].data) {
-		goOnFrame(d->handle, buf->datas[0].data,
+	if (buf->datas[0].data && buf->datas[0].chunk) {
+		int stride = (int)buf->datas[0].chunk->stride;
+		if (stride <= 0) {
+			stride = (int)d->format.info.raw.size.width * 4;
+		}
+		uint8_t *ptr = (uint8_t *)buf->datas[0].data + (int)buf->datas[0].chunk->offset;
+		goOnFrame(d->handle, ptr,
 		          (int)buf->datas[0].chunk->size,
 		          (int)d->format.info.raw.size.width,
 		          (int)d->format.info.raw.size.height,
-		          map_fmt(d->format.info.raw.format));
+		          map_fmt(d->format.info.raw.format),
+		          stride);
 	}
 	pw_stream_queue_buffer(d->stream, b);
 }
@@ -81,7 +89,7 @@ static int do_connect(struct capture_data *d, uint32_t node, int w, int h, int f
 		SPA_FORMAT_mediaType,    SPA_POD_Id(SPA_MEDIA_TYPE_video),
 		SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
 		SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(3,
-			SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBA),
+			SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx),
 		SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(
 			&SPA_RECTANGLE((uint32_t)w, (uint32_t)h),
 			&SPA_RECTANGLE(1, 1),
@@ -154,18 +162,11 @@ import (
 	"github.com/BarrettBr/HackKU-2026/config"
 )
 
-
 const (
 	FormatUnknown PixelFormat = 0
 	FormatBGRx    PixelFormat = 1
 	FormatRGBA    PixelFormat = 2
 )
-
-type ScreenStream interface {
-	Frames() <-chan Frame
-	Err() error
-	Stop()
-}
 
 type stream struct {
 	data        *C.struct_capture_data
@@ -208,7 +209,7 @@ func NewStream(cfg *config.Config) (ScreenStream, error) {
 	}
 	s.data = d
 
-	buf := max(cfg.FrameRate / 2, 4)
+	buf := max(cfg.FrameRate/2, 4)
 	s.frames = make(chan Frame, buf)
 
 	s.wg.Add(1)
@@ -239,12 +240,54 @@ func (s *stream) Stop() {
 }
 
 //export goOnFrame
-func goOnFrame(h C.uintptr_t, data unsafe.Pointer, size, w, height, pf C.int) {
+func goOnFrame(h C.uintptr_t, data unsafe.Pointer, size, w, height, pf, stride C.int) {
 	s := cgo.Handle(h).Value().(*stream)
-	b := make([]byte, int(size))
-	copy(b, unsafe.Slice((*byte)(data), int(size)))
+	if PixelFormat(pf) == FormatUnknown {
+		return
+	}
+	width := int(w)
+	frameHeight := int(height)
+	rowSize := width * 4
+	srcStride := int(stride)
+	if width <= 0 || frameHeight <= 0 || rowSize <= 0 || srcStride <= 0 {
+		return
+	}
+
+	totalSize := int(size)
+	if totalSize <= 0 {
+		return
+	}
+
+	src := unsafe.Slice((*byte)(data), totalSize)
+	b := make([]byte, rowSize*frameHeight)
+	for y := 0; y < frameHeight; y++ {
+		srcOff := y * srcStride
+		dstOff := y * rowSize
+		if srcOff >= len(src) {
+			return
+		}
+		avail := len(src) - srcOff
+		if avail < rowSize {
+			return
+		}
+		row := src[srcOff : srcOff+rowSize]
+		copy(b[dstOff:dstOff+rowSize], row)
+	}
+
+	// Normalize BGRx capture frames to RGBA for encoder consistency.
+	if PixelFormat(pf) == FormatBGRx {
+		for i := 0; i+3 < len(b); i += 4 {
+			b0 := b[i]
+			b2 := b[i+2]
+			b[i] = b2
+			b[i+2] = b0
+			b[i+3] = 0xFF
+		}
+		pf = C.int(FormatRGBA)
+	}
+
 	select {
-	case s.frames <- Frame{Data: b, Width: int(w), Height: int(height), Format: PixelFormat(pf)}:
+	case s.frames <- Frame{Data: b, Width: width, Height: frameHeight, Format: PixelFormat(pf)}:
 	default:
 	}
 }
