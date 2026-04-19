@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"time"
 )
 
 type EncodedFrame struct {
@@ -34,6 +33,9 @@ type Decoder interface {
 	Close() error
 }
 
+// ErrNoFrameReady is returned when a Decode call successfully wrote input to
+// ffmpeg but no complete frame is ready to emit yet. This is normal and
+// expected — decoders buffer input and emit when they have a decoded picture.
 var ErrNoFrameReady = errors.New("decoder frame not ready")
 
 func newDecoder(cfg decoderConfig) (Decoder, error) {
@@ -44,13 +46,19 @@ type ffmpegDecoder struct {
 	cfg       decoderConfig
 	frameSize int
 
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdout     io.ReadCloser
-	stdoutFile *os.File
-	rawBuffer  []byte
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
 
-	mu sync.Mutex
+	// Decoded frames queued by the reader goroutine. Each entry is one full
+	// raw frame of size `frameSize` bytes.
+	frameMu  sync.Mutex
+	frameBuf [][]byte
+	readErr  error
+
+	stopOnce sync.Once
+	done     chan struct{}
+	wg       sync.WaitGroup
 }
 
 func newFFmpegDecoder(cfg decoderConfig) (*ffmpegDecoder, error) {
@@ -72,6 +80,7 @@ func newFFmpegDecoder(cfg decoderConfig) (*ffmpegDecoder, error) {
 	d := &ffmpegDecoder{
 		cfg:       cfg,
 		frameSize: frameSize,
+		done:      make(chan struct{}),
 	}
 	if err := d.start(); err != nil {
 		return nil, err
@@ -81,11 +90,12 @@ func newFFmpegDecoder(cfg decoderConfig) (*ffmpegDecoder, error) {
 
 func (d *ffmpegDecoder) start() error {
 	args := []string{
-		"-loglevel", "error",
+		"-hide_banner",
+		"-loglevel", "warning",
 	}
-	if strings.EqualFold(d.cfg.Codec, "h264") || strings.TrimSpace(d.cfg.Codec) == "" {
-		// Force FFmpeg's native decoder to avoid libopenh264 decode failures on
-		// some distro builds.
+	if strings.EqualFold(d.cfg.Codec, "h264") {
+		// Pin the native decoder — some distro builds default to libopenh264
+		// which fails on streams with certain NAL orderings.
 		args = append(args, "-c:v", "h264")
 	}
 	args = append(args,
@@ -97,6 +107,7 @@ func (d *ffmpegDecoder) start() error {
 	)
 
 	d.cmd = exec.Command("ffmpeg", args...)
+	d.cmd.Stderr = os.Stderr
 
 	stdin, err := d.cmd.StdinPipe()
 	if err != nil {
@@ -109,59 +120,63 @@ func (d *ffmpegDecoder) start() error {
 	if err := d.cmd.Start(); err != nil {
 		return err
 	}
-
 	d.stdin = stdin
 	d.stdout = stdout
-	if file, ok := stdout.(*os.File); ok {
-		d.stdoutFile = file
-	}
+
+	d.wg.Add(1)
+	go d.readFrames()
 	return nil
 }
 
-func (d *ffmpegDecoder) Decode(frame EncodedFrame) (DecodedFrame, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// readFrames pulls raw frames out of ffmpeg stdout. ffmpeg emits exactly
+// `frameSize` bytes per decoded frame in rawvideo mode, so framing is just
+// "read full chunks of that size."
+func (d *ffmpegDecoder) readFrames() {
+	defer d.wg.Done()
 
-	if _, err := d.stdin.Write(frame.Payload); err != nil {
-		return DecodedFrame{}, err
+	for {
+		buf := make([]byte, d.frameSize)
+		if _, err := io.ReadFull(d.stdout, buf); err != nil {
+			d.frameMu.Lock()
+			d.readErr = err
+			d.frameMu.Unlock()
+			return
+		}
+		d.frameMu.Lock()
+		d.frameBuf = append(d.frameBuf, buf)
+		d.frameMu.Unlock()
 	}
+}
 
-	tmp := make([]byte, 128*1024)
-	for len(d.rawBuffer) < d.frameSize {
-		if d.stdoutFile != nil {
-			_ = d.stdoutFile.SetReadDeadline(time.Now().Add(75 * time.Millisecond))
-		}
-		n, err := d.stdout.Read(tmp)
-		if d.stdoutFile != nil {
-			_ = d.stdoutFile.SetReadDeadline(time.Time{})
-		}
-		if n > 0 {
-			d.rawBuffer = append(d.rawBuffer, tmp[:n]...)
-		}
-		if err != nil {
-			var pathErr *os.PathError
-			if errors.As(err, &pathErr) && errors.Is(pathErr.Err, os.ErrDeadlineExceeded) {
-				return DecodedFrame{}, ErrNoFrameReady
-			}
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				return DecodedFrame{}, ErrNoFrameReady
-			}
-			if err == io.EOF {
-				return DecodedFrame{}, ErrNoFrameReady
-			}
+func (d *ffmpegDecoder) Decode(frame EncodedFrame) (DecodedFrame, error) {
+	// Write the encoded frame to ffmpeg stdin. No locking needed here — the
+	// reader goroutine only touches stdout, not stdin, and Decode is expected
+	// to be called from a single goroutine at a time.
+	if len(frame.Payload) > 0 {
+		if _, err := d.stdin.Write(frame.Payload); err != nil {
 			return DecodedFrame{}, err
 		}
-		if n == 0 {
-			return DecodedFrame{}, ErrNoFrameReady
-		}
 	}
 
-	buf := make([]byte, d.frameSize)
-	copy(buf, d.rawBuffer[:d.frameSize])
-	d.rawBuffer = d.rawBuffer[d.frameSize:]
+	// Return whatever's been decoded so far, if anything.
+	d.frameMu.Lock()
+	defer d.frameMu.Unlock()
+
+	if len(d.frameBuf) == 0 {
+		if d.readErr != nil && d.readErr != io.EOF {
+			return DecodedFrame{}, d.readErr
+		}
+		return DecodedFrame{}, ErrNoFrameReady
+	}
+
+	// Pop the oldest queued frame. If the decoder has fallen behind and has
+	// multiple frames queued, the caller can keep calling Decode with an
+	// empty payload to drain the queue.
+	out := d.frameBuf[0]
+	d.frameBuf = d.frameBuf[1:]
 
 	return DecodedFrame{
-		Data:   buf,
+		Data:   out,
 		Width:  d.cfg.Width,
 		Height: d.cfg.Height,
 		Format: d.cfg.PixelFormat,
@@ -169,9 +184,7 @@ func (d *ffmpegDecoder) Decode(frame EncodedFrame) (DecodedFrame, error) {
 }
 
 func (d *ffmpegDecoder) Close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
+	d.stopOnce.Do(func() { close(d.done) })
 	if d.stdin != nil {
 		_ = d.stdin.Close()
 	}
@@ -179,16 +192,17 @@ func (d *ffmpegDecoder) Close() error {
 		_ = d.cmd.Process.Kill()
 		_ = d.cmd.Wait()
 	}
+	d.wg.Wait()
 	return nil
 }
 
 func rawFrameSize(pixelFormat string, width, height int) (int, error) {
 	switch strings.ToLower(strings.TrimSpace(pixelFormat)) {
-	case "yuv420p":
+	case "yuv420p", "nv12":
 		return (width * height * 3) / 2, nil
 	case "rgb24":
 		return width * height * 3, nil
-	case "rgba":
+	case "rgba", "bgra":
 		return width * height * 4, nil
 	default:
 		return 0, fmt.Errorf("unsupported pixel format: %s", pixelFormat)

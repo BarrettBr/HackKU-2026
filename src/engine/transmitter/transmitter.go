@@ -55,7 +55,9 @@ func New(cfg *config.Config) (*Service, error) {
 func (s *Service) Run() error {
 	s.runOnce.Do(func() {
 		enc, err := NewEncoder(&s.cfg.Transmitter)
-		if err == nil {
+		if err != nil {
+			log.Printf("encoder init failed: %v", err)
+		} else {
 			s.encoder = enc
 		}
 
@@ -166,7 +168,6 @@ func (s *Service) runSyntheticH264Loop() {
 func (s *Service) runCaptureLoop() {
 	defer s.wg.Done()
 
-	// Primary runtime path: real screen capture via portal/PipeWire.
 	if s.cfg.OS == "linux-wayland" {
 		if stream, err := recording.NewStream(s.cfg); err == nil {
 			defer stream.Stop()
@@ -179,7 +180,6 @@ func (s *Service) runCaptureLoop() {
 		}
 	}
 
-	// Synthetic fallback is opt-in only so runtime doesn't silently show test video.
 	if os.Getenv("ENGINE_ALLOW_SYNTHETIC_FALLBACK") == "1" {
 		log.Printf("using synthetic video fallback")
 		s.runSyntheticH264Loop()
@@ -210,17 +210,18 @@ func (s *Service) streamFrames(stream recording.ScreenStream) bool {
 			if frames == 1 {
 				log.Printf(
 					"capture first frame format=%d size=%dx%d cfg=%dx%d",
-					frame.Format,
-					frame.Width,
-					frame.Height,
-					s.cfg.Transmitter.PixelWidth,
-					s.cfg.Transmitter.PixelHeight,
+					frame.Format, frame.Width, frame.Height,
+					s.cfg.Transmitter.PixelWidth, s.cfg.Transmitter.PixelHeight,
 				)
 			}
+
 			encoded, err := s.encoder.Encode(frame)
 			if err != nil {
+				log.Printf("encode error: %v", err)
 				continue
 			}
+			// Empty output is normal — ffmpeg buffers input and emits when
+			// it has a complete access unit ready.
 			if len(encoded.Data) == 0 {
 				continue
 			}

@@ -41,9 +41,9 @@ func loadSettings() (*Config, error) {
 			},
 		},
 		Transmitter{
-			PixelWidth:    0,
-			PixelHeight:   0,
-			FrameRate:     30,
+			PixelWidth:    1366,
+			PixelHeight:   768,
+			FrameRate:     15,
 			FfmpegQuality: "fast",
 			StreamName:    "screen-capture",
 			PixelFormat:   "RGBA",

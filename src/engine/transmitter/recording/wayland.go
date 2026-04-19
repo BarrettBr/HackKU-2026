@@ -156,6 +156,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"unsafe"
+	"log"
 
 	"github.com/godbus/dbus/v5"
 
@@ -285,6 +286,7 @@ func goOnFrame(h C.uintptr_t, data unsafe.Pointer, size, w, height, pf, stride C
 		}
 		pf = C.int(FormatRGBA)
 	}
+	log.Printf("frame %dx%d data=%d expected=%d", width, frameHeight, len(b), width*frameHeight*4)
 
 	select {
 	case s.frames <- Frame{Data: b, Width: width, Height: frameHeight, Format: PixelFormat(pf)}:
