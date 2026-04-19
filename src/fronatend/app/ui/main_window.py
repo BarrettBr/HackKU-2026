@@ -90,7 +90,9 @@ class MainWindow(QMainWindow):
         self._video_connect_task: asyncio.Task | None = None
         self._video_recover_task: asyncio.Task | None = None
         self._current_ipc_path: str = ""
+        self._video_consumer_started_ts: float = 0.0
         self._last_video_frame_ts: float = 0.0
+        self._last_video_recover_ts: float = 0.0
         self._last_message_id = 0
         self._author_colors: dict[str, str] = {}
         self._author_avatars: dict[str, str] = {}
@@ -356,18 +358,18 @@ class MainWindow(QMainWindow):
         surface.clicked.connect(self._toggle_pause)
 
         layout = QVBoxLayout(surface)
-        layout.setContentsMargins(36, 36, 36, 36)
-        layout.setSpacing(18)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
 
-        live_stream = QLabel("LIVE STREAM")
-        live_stream.setObjectName("streamEyebrow")
-        live_stream.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(live_stream)
+        self._stream_eyebrow_label = QLabel("LIVE STREAM")
+        self._stream_eyebrow_label.setObjectName("streamEyebrow")
+        self._stream_eyebrow_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._stream_eyebrow_label)
 
-        title = QLabel("VIDEO STREAM")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setObjectName("videoTitle")
-        layout.addWidget(title)
+        self._video_title_label = QLabel("VIDEO STREAM")
+        self._video_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._video_title_label.setObjectName("videoTitle")
+        layout.addWidget(self._video_title_label)
 
         self._status_label = QLabel("")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1181,6 +1183,7 @@ class MainWindow(QMainWindow):
             consumer.open()
             self._ipc_consumer = consumer
             self._current_ipc_path = subscription.ipc_path
+            self._video_consumer_started_ts = time.monotonic()
             self._last_video_frame_ts = 0.0
             self._status_label.setText("Waiting for first video frame...")
             self._video_frame_timer.start()
@@ -1199,34 +1202,55 @@ class MainWindow(QMainWindow):
             self._ipc_consumer.close()
             self._ipc_consumer = None
         self._current_ipc_path = ""
+        self._video_consumer_started_ts = 0.0
         self._last_video_frame_ts = 0.0
+        self._last_video_recover_ts = 0.0
         if hasattr(self, "_video_frame_label"):
             self._video_frame_label.clear()
         if hasattr(self, "_status_label"):
             self._status_label.setText("")
+        if hasattr(self, "_stream_eyebrow_label"):
+            self._stream_eyebrow_label.show()
+        if hasattr(self, "_video_title_label"):
+            self._video_title_label.show()
 
     def _pump_video_frame(self) -> None:
         if self._ipc_consumer is None:
             return
         pixmap = self._ipc_consumer.read_latest_pixmap()
         if pixmap is None:
+            now = time.monotonic()
+            stalled_before_first_frame = (
+                self._video_consumer_started_ts > 0.0
+                and self._last_video_frame_ts == 0.0
+                and (now - self._video_consumer_started_ts) > 6.0
+            )
+            stalled_after_frames = (
+                self._last_video_frame_ts > 0.0
+                and (now - self._last_video_frame_ts) > 6.0
+            )
             if (
                 self._room_target is not None
                 and self._video_recover_task is None
-                and self._last_video_frame_ts > 0.0
-                and (time.monotonic() - self._last_video_frame_ts) > 2.0
+                and (stalled_before_first_frame or stalled_after_frames)
+                and (now - self._last_video_recover_ts) > 8.0
             ):
                 self._status_label.setText("Recovering stream...")
+                self._last_video_recover_ts = now
                 self._video_recover_task = asyncio.create_task(
                     self._recover_video_consumer()
                 )
             return
         self._last_video_frame_ts = time.monotonic()
         self._status_label.setText("")
+        if hasattr(self, "_stream_eyebrow_label"):
+            self._stream_eyebrow_label.hide()
+        if hasattr(self, "_video_title_label"):
+            self._video_title_label.hide()
         self._video_frame_label.setPixmap(
             pixmap.scaled(
                 self._video_frame_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
