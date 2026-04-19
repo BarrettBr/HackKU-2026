@@ -55,30 +55,34 @@ class IPCVideoConsumer:
         if frame_counter == 0:
             return None
 
-        slot_index = int(write_index % self._header.slot_count)
-        slot_offset = _HEADER_SIZE + slot_index * (
-            _SLOT_HEADER_SIZE + self._header.slot_size
-        )
-        seq_before = struct.unpack_from("<Q", self._mmap, slot_offset)[0]
-        size = struct.unpack_from("<I", self._mmap, slot_offset + 8)[0]
+        # Try newest slot first, then fall back to older slots if the newest
+        # one is being written concurrently.
+        for offset in range(self._header.slot_count):
+            slot_index = int((write_index - offset) % self._header.slot_count)
+            slot_offset = _HEADER_SIZE + slot_index * (
+                _SLOT_HEADER_SIZE + self._header.slot_size
+            )
+            seq_before = struct.unpack_from("<Q", self._mmap, slot_offset)[0]
+            if seq_before == 0 or seq_before <= self._last_seq:
+                continue
 
-        if seq_before == 0 or seq_before == self._last_seq:
-            return None
-        if size <= 0 or size > self._header.slot_size:
-            return None
+            size = struct.unpack_from("<I", self._mmap, slot_offset + 8)[0]
+            if size <= 0 or size > self._header.slot_size:
+                continue
 
-        payload_start = slot_offset + _SLOT_HEADER_SIZE
-        data = self._mmap[payload_start : payload_start + size]
-        seq_after = struct.unpack_from("<Q", self._mmap, slot_offset)[0]
-        if seq_after != seq_before:
-            return None
+            payload_start = slot_offset + _SLOT_HEADER_SIZE
+            data = self._mmap[payload_start : payload_start + size]
+            seq_after = struct.unpack_from("<Q", self._mmap, slot_offset)[0]
+            if seq_after != seq_before:
+                continue
 
-        pixmap = self._to_pixmap(bytes(data), self._header)
-        if pixmap is None:
-            return None
+            pixmap = self._to_pixmap(bytes(data), self._header)
+            if pixmap is None:
+                continue
 
-        self._last_seq = seq_after
-        return pixmap
+            self._last_seq = seq_after
+            return pixmap
+        return None
 
     def _read_header(self) -> IPCHeader:
         if self._mmap is None:

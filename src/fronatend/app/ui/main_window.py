@@ -1235,6 +1235,8 @@ class MainWindow(QMainWindow):
                 and (stalled_before_first_frame or stalled_after_frames)
                 and (now - self._last_video_recover_ts) > 8.0
             ):
+                # Prevent showing an old frozen frame forever.
+                self._video_frame_label.clear()
                 self._status_label.setText("Recovering stream...")
                 self._last_video_recover_ts = now
                 self._video_recover_task = asyncio.create_task(

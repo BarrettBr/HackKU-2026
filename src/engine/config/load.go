@@ -1,6 +1,12 @@
 package config
 
-import "github.com/pion/webrtc/v4"
+import (
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/pion/webrtc/v4"
+)
 
 type Transmitter struct {
 	PixelWidth    int
@@ -31,7 +37,7 @@ func Load() (*Config, error) {
 }
 
 func loadSettings() (*Config, error) {
-	return &Config{
+	cfg := &Config{
 		"linux-wayland",
 		&webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
@@ -55,5 +61,27 @@ func loadSettings() (*Config, error) {
 			Height:      0,
 			PixelFormat: "rgba",
 		},
-	}, nil
+	}
+
+	// Optional runtime overrides for local/dev tuning without code edits.
+	cfg.Transmitter.PixelWidth = envInt("ENGINE_TX_WIDTH", cfg.Transmitter.PixelWidth)
+	cfg.Transmitter.PixelHeight = envInt("ENGINE_TX_HEIGHT", cfg.Transmitter.PixelHeight)
+	cfg.Transmitter.FrameRate = envInt("ENGINE_TX_FPS", cfg.Transmitter.FrameRate)
+	if quality := strings.TrimSpace(os.Getenv("ENGINE_TX_QUALITY")); quality != "" {
+		cfg.Transmitter.FfmpegQuality = quality
+	}
+
+	return cfg, nil
+}
+
+func envInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return v
 }

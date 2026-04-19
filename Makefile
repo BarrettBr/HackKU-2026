@@ -52,7 +52,7 @@ dev: deps env
 		fi; \
 	}; \
 	trap cleanup EXIT INT TERM; \
-	setsid sh -c "cd $(ENGINE_DIR) && exec go run $(if $(ENGINE_GO_TAGS),-tags $(ENGINE_GO_TAGS),) ." & \
+	setsid sh -c "cd $(ENGINE_DIR) && ENGINE_TX_WIDTH=1280 ENGINE_TX_HEIGHT=720 ENGINE_TX_FPS=24 ENGINE_TX_QUALITY=veryfast exec go run $(if $(ENGINE_GO_TAGS),-tags $(ENGINE_GO_TAGS),) ." & \
 	BACKEND_PID=$$!; \
 	sleep 1; \
 	if ! kill -0 "$$BACKEND_PID" 2>/dev/null; then \
@@ -81,7 +81,7 @@ dev-dual: deps env
 		fi; \
 	}; \
 	trap cleanup EXIT INT TERM; \
-	setsid sh -c "cd $(ENGINE_DIR) && exec go run $(if $(ENGINE_GO_TAGS),-tags $(ENGINE_GO_TAGS),) ." & \
+	setsid sh -c "cd $(ENGINE_DIR) && ENGINE_TX_WIDTH=1280 ENGINE_TX_HEIGHT=720 ENGINE_TX_FPS=24 ENGINE_TX_QUALITY=veryfast exec go run $(if $(ENGINE_GO_TAGS),-tags $(ENGINE_GO_TAGS),) ." & \
 	BACKEND_PID=$$!; \
 	sleep 1; \
 	if ! kill -0 "$$BACKEND_PID" 2>/dev/null; then \
