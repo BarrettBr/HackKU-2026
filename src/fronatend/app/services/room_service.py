@@ -39,6 +39,7 @@ class RoomInfo:
     participants: list[str] = field(default_factory=list)
     is_paused: bool = False
     movie: RoomMovieInfo | None = None
+    subtitles: RoomSubtitleInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,13 @@ class RoomMovieInfo:
     plot: str = ""
     actors: str = ""
     rating: str = ""
+
+
+@dataclass(frozen=True)
+class RoomSubtitleInfo:
+    filename: str
+    content: str
+    cue_count: int
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,7 @@ class RoomHostService:
         self._next_message_id = 1
         self._is_paused = False
         self._movie: RoomMovieInfo | None = None
+        self._subtitles: RoomSubtitleInfo | None = None
 
     async def start_room(self, room_name: str) -> RoomInfo:
         await self.stop()
@@ -117,6 +126,7 @@ class RoomHostService:
         self._next_message_id = 1
         self._is_paused = False
         self._movie = None
+        self._subtitles = None
         return self.room
 
     async def stop(self) -> None:
@@ -129,6 +139,7 @@ class RoomHostService:
         self._next_message_id = 1
         self._is_paused = False
         self._movie = None
+        self._subtitles = None
 
     async def _handle_client(
         self,
@@ -173,6 +184,8 @@ class RoomHostService:
             status, payload = self._handle_playback(body)
         elif method == "POST" and path == "/movie":
             status, payload = self._handle_movie(body)
+        elif method == "POST" and path == "/subtitles":
+            status, payload = self._handle_subtitles(body)
         elif method == "GET" and path == "/health":
             status = 200
             payload = {"ok": True}
@@ -341,6 +354,26 @@ class RoomHostService:
         self.room.movie = movie
         return 200, {"ok": True, "room": self._room_payload()}
 
+    def _handle_subtitles(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        if self.room is None:
+            return 503, {"ok": False, "error": "room is not active"}
+
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return 400, {"ok": False, "error": "invalid JSON"}
+
+        if data.get("room_id") != self.room.room_id:
+            return 404, {"ok": False, "error": "room ID does not match this host"}
+
+        subtitles = _subtitles_from_payload(data.get("subtitles"))
+        if subtitles is None:
+            return 400, {"ok": False, "error": "subtitle info is missing"}
+
+        self._subtitles = subtitles
+        self.room.subtitles = subtitles
+        return 200, {"ok": True, "room": self._room_payload()}
+
     def _room_payload(self) -> dict[str, Any]:
         if self.room is None:
             return {}
@@ -355,6 +388,11 @@ class RoomHostService:
             "participants": self.room.participants,
             "is_paused": self._is_paused,
             "movie": _movie_payload(self._movie) if self._movie is not None else None,
+            "subtitles": (
+                _subtitles_payload(self._subtitles)
+                if self._subtitles is not None
+                else None
+            ),
         }
 
 
@@ -496,6 +534,24 @@ class RoomClient:
 
         return room_info_from_payload(payload["room"])
 
+    async def update_subtitles(
+        self,
+        target: JoinTarget,
+        subtitles: RoomSubtitleInfo,
+    ) -> RoomInfo:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/subtitles",
+                json={
+                    "room_id": target.room_id,
+                    "subtitles": _subtitles_payload(subtitles),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return room_info_from_payload(payload["room"])
+
     async def fetch_messages(
         self,
         target: JoinTarget,
@@ -525,6 +581,7 @@ def room_info_from_payload(room_payload: dict[str, Any]) -> RoomInfo:
         participants=list(room_payload["participants"]),
         is_paused=bool(room_payload.get("is_paused", False)),
         movie=_movie_from_payload(room_payload.get("movie")),
+        subtitles=_subtitles_from_payload(room_payload.get("subtitles")),
     )
 
 
@@ -671,6 +728,31 @@ def _movie_from_payload(payload: Any) -> RoomMovieInfo | None:
         plot=str(payload.get("plot") or ""),
         actors=str(payload.get("actors") or ""),
         rating=str(payload.get("rating") or ""),
+    )
+
+
+def _subtitles_payload(subtitles: RoomSubtitleInfo) -> dict[str, Any]:
+    return {
+        "filename": subtitles.filename,
+        "content": subtitles.content,
+        "cue_count": subtitles.cue_count,
+    }
+
+
+def _subtitles_from_payload(payload: Any) -> RoomSubtitleInfo | None:
+    if not isinstance(payload, dict):
+        return None
+
+    filename = str(payload.get("filename") or "")
+    content = str(payload.get("content") or "")
+    cue_count = int(payload.get("cue_count") or 0)
+    if not filename or not content or cue_count <= 0:
+        return None
+
+    return RoomSubtitleInfo(
+        filename=filename,
+        content=content,
+        cue_count=cue_count,
     )
 
 

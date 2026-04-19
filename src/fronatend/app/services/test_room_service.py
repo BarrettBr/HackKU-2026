@@ -8,6 +8,7 @@ from app.services.room_service import (
     RoomClient,
     RoomHostService,
     RoomMovieInfo,
+    RoomSubtitleInfo,
     build_invite_link,
     parse_join_target,
 )
@@ -284,5 +285,37 @@ async def test_movie_info_updates_for_room() -> None:
 
         assert updated_room.movie == movie
         assert fetched_room.movie == movie
+    finally:
+        await host.stop()
+
+
+@pytest.mark.anyio
+async def test_subtitles_update_for_room() -> None:
+    host = RoomHostService(display_name="Host")
+    room = await host.start_room("Subtitle Room")
+
+    try:
+        local_invite = build_invite_link(
+            room_id=room.room_id,
+            room_name=room.room_name,
+            host="127.0.0.1",
+            port=room.port,
+        )
+        target = parse_join_target(local_invite)
+        client = RoomClient(display_name="Viewer")
+        subtitles = RoomSubtitleInfo(
+            filename="movie.srt",
+            content=("1\n00:00:01,000 --> 00:00:03,000\n" "Hello from subtitles.\n"),
+            cue_count=1,
+        )
+
+        updated_room = await client.update_subtitles(
+            target=target,
+            subtitles=subtitles,
+        )
+        fetched_room, _messages = await client.fetch_messages(target=target, after=0)
+
+        assert updated_room.subtitles == subtitles
+        assert fetched_room.subtitles == subtitles
     finally:
         await host.stop()

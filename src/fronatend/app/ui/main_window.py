@@ -5,6 +5,7 @@ import asyncio
 from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,8 +31,10 @@ from app.services.room_service import (
     RoomHostService,
     RoomInfo,
     RoomMovieInfo,
+    RoomSubtitleInfo,
     parse_join_target,
 )
+from app.services.subtitle_service import load_srt_file
 from app.services.ws_client import WsClient
 from app.state.app_state import AppState
 from app.ui.chat_panel import ChatPanel
@@ -65,7 +68,10 @@ class MainWindow(QMainWindow):
         self._movie_info_plot: QLabel
         self._movie_info_cast: QLabel
         self._movie_search_button: QPushButton
+        self._subtitle_button: QPushButton
+        self._subtitle_status: QLabel
         self._current_movie: RoomMovieInfo | None = None
+        self._current_subtitles: RoomSubtitleInfo | None = None
         self._room_host = RoomHostService(display_name=self.state.display_name)
         self._room_client = RoomClient(display_name=self.state.display_name)
         self._room_target: JoinTarget | None = None
@@ -500,6 +506,7 @@ class MainWindow(QMainWindow):
         self.state.participants = room.participants
         self.is_paused = room.is_paused
         self._current_movie = room.movie
+        self._current_subtitles = room.subtitles
 
         self._room_name_label.setText(room.room_name)
         self._connection_label.setText(self.state.connection_status)
@@ -513,6 +520,8 @@ class MainWindow(QMainWindow):
         self._apply_pause_state(room.is_paused)
         if room.movie is not None:
             self._apply_room_movie(room.movie)
+        if room.subtitles is not None:
+            self._apply_room_subtitles(room.subtitles)
 
     def _refresh_participants(self, participants: list[str]) -> None:
         self.state.participants = participants
@@ -645,6 +654,8 @@ class MainWindow(QMainWindow):
             self._apply_pause_state(room.is_paused)
         if room.movie is not None:
             self._apply_room_movie(room.movie)
+        if room.subtitles is not None:
+            self._apply_room_subtitles(room.subtitles)
         for message in messages:
             self._append_chat_message(message)
 
@@ -725,10 +736,12 @@ class MainWindow(QMainWindow):
         if self.state.is_host:
             self._movie_search_input.show()
             self._movie_search_button.show()
+            self._subtitle_button.show()
             self._movie_search_input.setText(self.state.movie_title)
         else:
             self._movie_search_input.hide()
             self._movie_search_button.hide()
+            self._subtitle_button.hide()
             if self._current_movie is None:
                 self._movie_info_title.setText("No movie selected yet.")
                 self._movie_info_plot.setText(
@@ -737,6 +750,8 @@ class MainWindow(QMainWindow):
                 self._movie_info_cast.setText("")
         if self._current_movie is not None:
             self._apply_room_movie(self._current_movie)
+        if self._current_subtitles is not None:
+            self._apply_room_subtitles(self._current_subtitles)
         self._movie_info_dialog.show()
         self._movie_info_dialog.raise_()
         self._movie_info_dialog.activateWindow()
@@ -767,6 +782,16 @@ class MainWindow(QMainWindow):
         self._movie_search_button.clicked.connect(self._search_movie_info)
         layout.addWidget(self._movie_search_button)
 
+        self._subtitle_button = QPushButton("Choose .srt subtitles")
+        self._subtitle_button.setObjectName("ghostButton")
+        self._subtitle_button.clicked.connect(self._choose_subtitles)
+        layout.addWidget(self._subtitle_button)
+
+        self._subtitle_status = QLabel("No subtitle file selected.")
+        self._subtitle_status.setObjectName("movieInfoBody")
+        self._subtitle_status.setWordWrap(True)
+        layout.addWidget(self._subtitle_status)
+
         self._movie_info_title = QLabel("No movie selected yet.")
         self._movie_info_title.setObjectName("movieInfoTitle")
         self._movie_info_title.setWordWrap(True)
@@ -786,6 +811,34 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._movie_info_cast)
 
         return dialog
+
+    def _choose_subtitles(self) -> None:
+        if not self.state.is_host:
+            return
+
+        file_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose subtitles",
+            "",
+            "SRT subtitles (*.srt)",
+        )
+        if not file_path:
+            return
+
+        try:
+            parsed = load_srt_file(file_path)
+        except ValueError as error:
+            self._subtitle_status.setText(str(error))
+            return
+
+        subtitles = RoomSubtitleInfo(
+            filename=parsed.filename,
+            content=parsed.content,
+            cue_count=parsed.cue_count,
+        )
+        self._apply_room_subtitles(subtitles)
+        if self._room_target is not None:
+            asyncio.create_task(self._broadcast_subtitles(self._room_target, subtitles))
 
     def _search_movie_info(self) -> None:
         query = self._movie_search_input.text().strip()
@@ -848,6 +901,27 @@ class MainWindow(QMainWindow):
             await self._room_client.update_movie(target, movie)
         except Exception as error:
             self.statusBar().showMessage(f"Movie info did not sync: {error}", 3000)
+
+    def _apply_room_subtitles(self, subtitles: RoomSubtitleInfo) -> None:
+        self._current_subtitles = subtitles
+        if self._movie_info_dialog is not None:
+            self._subtitle_status.setText(
+                f"Subtitles: {subtitles.filename} ({subtitles.cue_count} cues)"
+            )
+        self.statusBar().showMessage(
+            f"Loaded subtitles: {subtitles.filename}",
+            3000,
+        )
+
+    async def _broadcast_subtitles(
+        self,
+        target: JoinTarget,
+        subtitles: RoomSubtitleInfo,
+    ) -> None:
+        try:
+            await self._room_client.update_subtitles(target, subtitles)
+        except Exception as error:
+            self.statusBar().showMessage(f"Subtitles did not sync: {error}", 3000)
 
     def _show_invite_hint(self) -> None:
         if not self.state.invite_link:
