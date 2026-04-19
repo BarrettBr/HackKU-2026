@@ -78,11 +78,8 @@ type negotiatedSink struct {
 
 	mu          sync.Mutex
 	inner       *ipc.RingBufferSink
-	ready       chan struct{}
-	readyOnce   sync.Once
 	width       int
 	height      int
-	initErr     error
 	onDimension func(width, height int, pixelFormat string)
 }
 
@@ -91,7 +88,6 @@ func newNegotiatedSink(path, pixelFormat string, slotCount int, onDimension func
 		path:        path,
 		pixelFormat: pixelFormat,
 		slotCount:   slotCount,
-		ready:       make(chan struct{}),
 		onDimension: onDimension,
 	}
 }
@@ -121,8 +117,6 @@ func (s *negotiatedSink) WriteFrame(frame receiver.DecodedFrame) error {
 			SlotCount:   s.slotCount,
 		})
 		if err != nil {
-			s.initErr = err
-			s.readyOnce.Do(func() { close(s.ready) })
 			return err
 		}
 		s.inner = inner
@@ -131,20 +125,8 @@ func (s *negotiatedSink) WriteFrame(frame receiver.DecodedFrame) error {
 		if s.onDimension != nil {
 			s.onDimension(width, height, format)
 		}
-		s.readyOnce.Do(func() { close(s.ready) })
 	}
 	return s.inner.WriteFrame(frame)
-}
-
-func (s *negotiatedSink) WaitReady(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.ready:
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.initErr
-	}
 }
 
 func (s *negotiatedSink) Close() error {

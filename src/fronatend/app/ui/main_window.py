@@ -1101,7 +1101,7 @@ class MainWindow(QMainWindow):
         self._video_frame_label.setPixmap(
             pixmap.scaled(
                 self._video_frame_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
         )

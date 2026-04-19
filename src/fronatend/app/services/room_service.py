@@ -612,17 +612,22 @@ class RoomClient:
 
 
 class EngineRuntimeClient:
-    def __init__(self, engine_api_port: int = 8080) -> None:
+    def __init__(
+        self,
+        engine_api_host: str = "127.0.0.1",
+        engine_api_port: int = 8080,
+    ) -> None:
+        self.engine_api_host = engine_api_host
         self.engine_api_port = engine_api_port
 
-    def _base_url(self, target: JoinTarget) -> str:
-        return f"http://{target.host}:{self.engine_api_port}"
+    def _base_url(self) -> str:
+        return f"http://{self.engine_api_host}:{self.engine_api_port}"
 
     async def subscribe_watcher(self, target: JoinTarget) -> WatcherSubscription:
         signaling_url = f"http://{target.host}:{target.port}/webrtc/offer"
         async with httpx.AsyncClient(timeout=8.0) as client:
             response = await client.post(
-                f"{self._base_url(target)}/subscribe",
+                f"{self._base_url()}/subscribe",
                 json={
                     "room_code": target.room_id,
                     "signaling_url": signaling_url,
@@ -640,15 +645,17 @@ class EngineRuntimeClient:
         )
 
     async def unsubscribe(self, target: JoinTarget) -> None:
+        _ = target
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
-                f"{self._base_url(target)}/unsubscribe", json={}
+                f"{self._base_url()}/unsubscribe", json={}
             )
             response.raise_for_status()
 
     async def get_subscription(self, target: JoinTarget) -> WatcherSubscription:
+        _ = target
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{self._base_url(target)}/subscription")
+            response = await client.get(f"{self._base_url()}/subscription")
             response.raise_for_status()
             payload = response.json()
 
