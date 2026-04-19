@@ -22,7 +22,7 @@ class Settings(BaseModel):
     omdb_api_key: str = ""
     opensubtitles_api_key: str = ""
     opensubtitles_user_agent: str = "MoovieNight v1"
-    tenor_api_key: str = ""
+    giphy_api_key: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -35,5 +35,5 @@ def get_settings() -> Settings:
         opensubtitles_user_agent=os.getenv(
             "OPENSUBTITLES_USER_AGENT", "MoovieNight v1"
         ),
-        tenor_api_key=os.getenv("TENOR_API_KEY", ""),
+        giphy_api_key=os.getenv("GIPHY_API_KEY", ""),
     )

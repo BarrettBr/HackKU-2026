@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, QTimer, Qt, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -43,6 +44,9 @@ from app.services.ws_client import WsClient
 from app.state.app_state import AppState
 from app.ui.chat_panel import ChatPanel
 from app.ui.user_list import UserListDialog
+
+
+ACTION_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "actions"
 
 
 class VideoSurface(QFrame):
@@ -419,8 +423,11 @@ class MainWindow(QMainWindow):
         self._pause_button.clicked.connect(self._toggle_pause)
         layout.addWidget(self._pause_button)
 
-        self._volume_button = QPushButton("🔊")
+        self._volume_button = QPushButton()
         self._volume_button.setObjectName("iconButton")
+        self._volume_button.setIcon(QIcon(str(ACTION_ICON_DIR / "volume.svg")))
+        self._volume_button.setIconSize(QSize(22, 22))
+        self._volume_button.setToolTip("Volume")
         self._volume_button.clicked.connect(self._toggle_volume_controls)
         layout.addWidget(self._volume_button)
 
@@ -1155,7 +1162,8 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
             QWidget {
                 color: #ffffff;
                 font-family: "SF Pro Display", "Helvetica Neue", sans-serif;
@@ -1570,4 +1578,5 @@ class MainWindow(QMainWindow):
                 background: #141626;
                 color: #e0bad7;
             }
-            """)
+            """
+        )

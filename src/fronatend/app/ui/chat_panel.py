@@ -35,7 +35,7 @@ from app.config import get_settings
 from app.services.gif_service import (
     GifSearchResult,
     gif_result_to_attachment,
-    search_tenor_gifs,
+    search_giphy_gifs,
 )
 from app.services.room_service import ChatAttachment
 
@@ -745,24 +745,24 @@ class GifLibraryDialog(QDialog):
         settings = get_settings()
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText(
-            "Search Tenor GIFs..."
-            if settings.tenor_api_key
+            "Search GIPHY GIFs..."
+            if settings.giphy_api_key
             else "Search built-in fallback GIFs..."
         )
         self._search_input.returnPressed.connect(self._search_online)
         self._search_input.textChanged.connect(self._refresh_results)
         layout.addWidget(self._search_input)
 
-        self._search_button = QPushButton("Search Tenor")
+        self._search_button = QPushButton("Search GIPHY")
         self._search_button.setObjectName("gifChoiceButton")
-        self._search_button.setVisible(bool(settings.tenor_api_key))
+        self._search_button.setVisible(bool(settings.giphy_api_key))
         self._search_button.clicked.connect(self._search_online)
         layout.addWidget(self._search_button)
 
         self._status_label = QLabel(
-            "Powered by Tenor"
-            if settings.tenor_api_key
-            else "Add TENOR_API_KEY to .env for Discord-style GIF search."
+            "Powered by GIPHY"
+            if settings.giphy_api_key
+            else "Add GIPHY_API_KEY to .env for Discord-style GIF search."
         )
         self._status_label.setObjectName("attachmentTitle")
         self._status_label.setWordWrap(True)
@@ -773,7 +773,7 @@ class GifLibraryDialog(QDialog):
         layout.addLayout(self._results)
         self._refresh_results()
 
-        if settings.tenor_api_key:
+        if settings.giphy_api_key:
             self._search_input.setText("movie reaction")
             self._search_online()
 
@@ -814,21 +814,21 @@ class GifLibraryDialog(QDialog):
 
     def _search_online(self) -> None:
         query = self._search_input.text().strip() or "movie reaction"
-        self._status_label.setText(f"Searching Tenor for {query}...")
+        self._status_label.setText(f"Searching GIPHY for {query}...")
         self._search_button.setEnabled(False)
         asyncio.create_task(self._search_online_async(query))
 
     async def _search_online_async(self, query: str) -> None:
         try:
-            self._online_results = await search_tenor_gifs(query)
+            self._online_results = await search_giphy_gifs(query)
         except Exception as error:
             self._online_results = []
             self._status_label.setText(
-                f"Tenor search failed: {error}. Showing built-in fallback GIFs."
+                f"GIPHY search failed: {error}. Showing built-in fallback GIFs."
             )
         else:
             count = len(self._online_results)
-            self._status_label.setText(f"Powered by Tenor · {count} results")
+            self._status_label.setText(f"Powered by GIPHY · {count} results")
         finally:
             self._search_button.setEnabled(True)
             self._refresh_results()

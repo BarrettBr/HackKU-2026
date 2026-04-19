@@ -16,29 +16,29 @@ class GifSearchResult:
     title: str
     gif_url: str
     preview_url: str
-    provider: str = "Tenor"
+    provider: str = "GIPHY"
 
 
-async def search_tenor_gifs(query: str, limit: int = 12) -> list[GifSearchResult]:
+async def search_giphy_gifs(query: str, limit: int = 12) -> list[GifSearchResult]:
     settings = get_settings()
-    if not settings.tenor_api_key:
-        raise RuntimeError("TENOR_API_KEY is not set.")
+    if not settings.giphy_api_key:
+        raise RuntimeError("GIPHY_API_KEY is not set.")
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(
-            "https://g.tenor.com/v1/search",
+            "https://api.giphy.com/v1/gifs/search",
             params={
                 "q": query,
-                "key": settings.tenor_api_key,
+                "api_key": settings.giphy_api_key,
                 "limit": limit,
-                "media_filter": "minimal",
-                "contentfilter": "medium",
-                "locale": "en_US",
+                "rating": "pg-13",
+                "lang": "en",
+                "bundle": "messaging_non_clips",
             },
         )
         response.raise_for_status()
 
-    return _parse_tenor_results(response.json())
+    return _parse_giphy_results(response.json())
 
 
 async def gif_result_to_attachment(result: GifSearchResult) -> ChatAttachment:
@@ -54,15 +54,18 @@ async def gif_result_to_attachment(result: GifSearchResult) -> ChatAttachment:
     )
 
 
-def _parse_tenor_results(payload: dict[str, Any]) -> list[GifSearchResult]:
+def _parse_giphy_results(payload: dict[str, Any]) -> list[GifSearchResult]:
     results: list[GifSearchResult] = []
-    for item in payload.get("results", []):
-        media = _first_media_item(item)
-        if media is None:
-            continue
-
-        gif_url = _media_url(media, "gif")
-        preview_url = _media_url(media, "tinygif") or gif_url
+    for item in payload.get("data", []):
+        images = item.get("images", {})
+        gif_url = _giphy_image_url(images, "downsized") or _giphy_image_url(
+            images, "original"
+        )
+        preview_url = (
+            _giphy_image_url(images, "fixed_width_small")
+            or _giphy_image_url(images, "preview_gif")
+            or gif_url
+        )
         if not gif_url and not preview_url:
             continue
 
@@ -77,39 +80,25 @@ def _parse_tenor_results(payload: dict[str, Any]) -> list[GifSearchResult]:
     return results
 
 
-def _first_media_item(item: dict[str, Any]) -> dict[str, Any] | None:
-    media = item.get("media")
-    if isinstance(media, list) and media and isinstance(media[0], dict):
-        return media[0]
-
-    media_formats = item.get("media_formats")
-    if isinstance(media_formats, dict):
-        return media_formats
-
-    return None
-
-
-def _media_url(media: dict[str, Any], key: str) -> str:
-    value = media.get(key)
+def _giphy_image_url(images: dict[str, Any], key: str) -> str:
+    value = images.get(key)
     if isinstance(value, dict):
         return str(value.get("url") or "")
     return ""
 
 
 def _title_from_item(item: dict[str, Any]) -> str:
-    content_description = str(item.get("content_description") or "").strip()
-    if content_description:
-        return content_description
+    title = str(item.get("title") or "").strip()
+    if title:
+        return title
 
-    tags = item.get("tags")
-    if isinstance(tags, list):
-        clean_tags = [str(tag).strip() for tag in tags if str(tag).strip()]
-        if clean_tags:
-            return " ".join(clean_tags[:3])
+    slug = str(item.get("slug") or "").strip()
+    if slug:
+        return slug.rsplit("-", maxsplit=1)[0].replace("-", " ")
 
-    return "Tenor GIF"
+    return "GIPHY GIF"
 
 
 def _slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug[:48] or "tenor-gif"
+    return slug[:48] or "giphy-gif"

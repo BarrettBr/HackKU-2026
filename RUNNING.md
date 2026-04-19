@@ -30,7 +30,7 @@ Movie lookup uses no-key public lookup first, then the `cinemagoer` Python libra
 
 Auto subtitle search uses the OpenSubtitles API instead of scraping subtitle sites. Add `OPENSUBTITLES_API_KEY` to `.env` if you want the host to search for `.srt` files by movie title from inside the app. Hosts can still choose a local `.srt` manually without an API key.
 
-GIF search uses Tenor when `TENOR_API_KEY` is set in `.env`. Without a key, the app keeps using the small built-in fallback GIFs.
+GIF search uses GIPHY when `GIPHY_API_KEY` is set in `.env`. Without a key, the app keeps using the small built-in fallback GIFs.
 
 ## Manual commands
 
