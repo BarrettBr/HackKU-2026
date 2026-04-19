@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/BarrettBr/HackKU-2026/config"
 	"github.com/BarrettBr/HackKU-2026/ipc"
@@ -217,18 +216,6 @@ func (w *watcherController) subscribe(req subscribeRequest) (subscriptionStatus,
 	w.mu.Unlock()
 
 	go w.runWatcherSession(ctx, sessionID, client, req.RoomCode, req.SignalingURL)
-	waitCtx, cancelWait := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancelWait()
-	if err := sink.WaitReady(waitCtx); err != nil && err != context.DeadlineExceeded {
-		w.mu.Lock()
-		w.status.LastError = err.Error()
-		status = w.status
-		w.mu.Unlock()
-		return status, nil
-	}
-	w.mu.Lock()
-	status = w.status
-	w.mu.Unlock()
 	return status, nil
 }
 

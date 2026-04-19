@@ -170,7 +170,7 @@ func (s *Service) runCaptureLoop() {
 	if s.cfg.OS == "linux-wayland" {
 		if stream, err := recording.NewStream(s.cfg); err == nil {
 			defer stream.Stop()
-			if s.streamFrames(stream, 8*time.Second) {
+			if s.streamFrames(stream) {
 				return
 			}
 			log.Printf("capture stream ended without usable frames")
@@ -186,7 +186,7 @@ func (s *Service) runCaptureLoop() {
 	}
 }
 
-func (s *Service) streamFrames(stream recording.ScreenStream, noFrameTimeout time.Duration) bool {
+func (s *Service) streamFrames(stream recording.ScreenStream) bool {
 	if s.encoder == nil {
 		return false
 	}
@@ -196,17 +196,11 @@ func (s *Service) streamFrames(stream recording.ScreenStream, noFrameTimeout tim
 		frameRate = 30
 	}
 	frameDuration := time.Second / time.Duration(frameRate)
-	timer := time.NewTimer(noFrameTimeout)
-	defer timer.Stop()
 	frames := 0
 
 	for {
 		select {
 		case <-s.stopCh:
-			return frames > 0
-		case <-timer.C:
-			// PipeWire session can come up without producing frames (portal canceled,
-			// missing source selection, etc). Fall back so watchers still receive media.
 			return frames > 0
 		case frame, ok := <-stream.Frames():
 			if !ok {
@@ -222,12 +216,6 @@ func (s *Service) streamFrames(stream recording.ScreenStream, noFrameTimeout tim
 					s.cfg.Transmitter.PixelWidth,
 					s.cfg.Transmitter.PixelHeight,
 				)
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
 			}
 			encoded, err := s.encoder.Encode(frame)
 			if err != nil {

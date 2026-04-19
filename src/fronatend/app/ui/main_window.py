@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self._engine_runtime = EngineRuntimeClient()
         self._room_target: JoinTarget | None = None
         self._ipc_consumer: IPCVideoConsumer | None = None
+        self._video_connect_task: asyncio.Task | None = None
         self._last_message_id = 0
         self._author_colors: dict[str, str] = {}
         self._author_avatars: dict[str, str] = {}
@@ -506,7 +507,6 @@ class MainWindow(QMainWindow):
             target = parse_join_target(invite)
             room = await self._room_client.join(invite)
             subscription = await self._engine_runtime.subscribe_watcher(target)
-            subscription = await self._await_ready_subscription(target, subscription)
         except Exception as error:
             self._landing_status.setText(f"Could not join room: {error}")
             if "target" in locals():
@@ -519,24 +519,30 @@ class MainWindow(QMainWindow):
         self._apply_room_info(room=room, is_host=False)
         self._room_target = target
         self._start_video_consumer(subscription)
+        if self._video_connect_task is not None:
+            self._video_connect_task.cancel()
+            self._video_connect_task = None
+        self._video_connect_task = asyncio.create_task(
+            self._ensure_video_consumer_ready(target, subscription)
+        )
         self._landing_status.setText(f"Connected to {room.room_name}.")
         self._show_room()
 
-    async def _await_ready_subscription(
+    async def _ensure_video_consumer_ready(
         self,
         target: JoinTarget,
         subscription: WatcherSubscription,
-    ) -> WatcherSubscription:
+    ) -> None:
         if subscription.ipc_path and Path(subscription.ipc_path).exists():
-            return subscription
+            self._start_video_consumer(subscription)
+            return
 
-        for _ in range(24):  # ~6s max wait
+        for _ in range(80):  # ~20s max wait
             await asyncio.sleep(0.25)
             latest = await self._engine_runtime.get_subscription(target)
             if latest.ipc_path and Path(latest.ipc_path).exists():
-                return latest
-
-        return subscription
+                self._start_video_consumer(latest)
+                return
 
     def _apply_room_info(self, room: RoomInfo, is_host: bool) -> None:
         self.state.room_id = room.room_id
@@ -1066,6 +1072,9 @@ class MainWindow(QMainWindow):
             self._status_label.setText(f"Video init failed: {error}")
 
     def _stop_video_consumer(self) -> None:
+        if self._video_connect_task is not None:
+            self._video_connect_task.cancel()
+            self._video_connect_task = None
         self._video_frame_timer.stop()
         if self._ipc_consumer is not None:
             self._ipc_consumer.close()
