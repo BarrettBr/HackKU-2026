@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
@@ -505,6 +506,7 @@ class MainWindow(QMainWindow):
             target = parse_join_target(invite)
             room = await self._room_client.join(invite)
             subscription = await self._engine_runtime.subscribe_watcher(target)
+            subscription = await self._await_ready_subscription(target, subscription)
         except Exception as error:
             self._landing_status.setText(f"Could not join room: {error}")
             if "target" in locals():
@@ -519,6 +521,22 @@ class MainWindow(QMainWindow):
         self._start_video_consumer(subscription)
         self._landing_status.setText(f"Connected to {room.room_name}.")
         self._show_room()
+
+    async def _await_ready_subscription(
+        self,
+        target: JoinTarget,
+        subscription: WatcherSubscription,
+    ) -> WatcherSubscription:
+        if subscription.ipc_path and Path(subscription.ipc_path).exists():
+            return subscription
+
+        for _ in range(24):  # ~6s max wait
+            await asyncio.sleep(0.25)
+            latest = await self._engine_runtime.get_subscription(target)
+            if latest.ipc_path and Path(latest.ipc_path).exists():
+                return latest
+
+        return subscription
 
     def _apply_room_info(self, room: RoomInfo, is_host: bool) -> None:
         self.state.room_id = room.room_id

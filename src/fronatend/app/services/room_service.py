@@ -646,6 +646,19 @@ class EngineRuntimeClient:
             )
             response.raise_for_status()
 
+    async def get_subscription(self, target: JoinTarget) -> WatcherSubscription:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{self._base_url(target)}/subscription")
+            response.raise_for_status()
+            payload = response.json()
+
+        return WatcherSubscription(
+            ipc_path=str(payload.get("ipc_path") or ""),
+            width=int(payload.get("width") or 0),
+            height=int(payload.get("height") or 0),
+            pixel_format=str(payload.get("pixel_format") or ""),
+        )
+
 
 def room_info_from_payload(room_payload: dict[str, Any]) -> RoomInfo:
     return RoomInfo(
