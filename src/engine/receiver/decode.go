@@ -91,6 +91,7 @@ func (d *ffmpegDecoder) start() error {
 	args = append(args,
 		"-f", strings.ToLower(d.cfg.Codec),
 		"-i", "pipe:0",
+		"-vf", fmt.Sprintf("crop=%d:%d:0:0", d.cfg.Width, d.cfg.Height),
 		"-f", "rawvideo",
 		"-pix_fmt", d.cfg.PixelFormat,
 		"pipe:1",
