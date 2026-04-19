@@ -34,7 +34,7 @@ from app.services.room_service import (
     RoomSubtitleInfo,
     parse_join_target,
 )
-from app.services.subtitle_service import load_srt_file
+from app.services.subtitle_service import load_srt_file, search_opensubtitles_srt
 from app.services.ws_client import WsClient
 from app.state.app_state import AppState
 from app.ui.chat_panel import ChatPanel
@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self._movie_info_cast: QLabel
         self._movie_search_button: QPushButton
         self._subtitle_button: QPushButton
+        self._subtitle_auto_button: QPushButton
         self._subtitle_status: QLabel
         self._current_movie: RoomMovieInfo | None = None
         self._current_subtitles: RoomSubtitleInfo | None = None
@@ -737,11 +738,13 @@ class MainWindow(QMainWindow):
             self._movie_search_input.show()
             self._movie_search_button.show()
             self._subtitle_button.show()
+            self._subtitle_auto_button.show()
             self._movie_search_input.setText(self.state.movie_title)
         else:
             self._movie_search_input.hide()
             self._movie_search_button.hide()
             self._subtitle_button.hide()
+            self._subtitle_auto_button.hide()
             if self._current_movie is None:
                 self._movie_info_title.setText("No movie selected yet.")
                 self._movie_info_plot.setText(
@@ -787,6 +790,11 @@ class MainWindow(QMainWindow):
         self._subtitle_button.clicked.connect(self._choose_subtitles)
         layout.addWidget(self._subtitle_button)
 
+        self._subtitle_auto_button = QPushButton("Find subtitles")
+        self._subtitle_auto_button.setObjectName("ghostButton")
+        self._subtitle_auto_button.clicked.connect(self._find_subtitles)
+        layout.addWidget(self._subtitle_auto_button)
+
         self._subtitle_status = QLabel("No subtitle file selected.")
         self._subtitle_status.setObjectName("movieInfoBody")
         self._subtitle_status.setWordWrap(True)
@@ -798,8 +806,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._movie_info_title)
 
         self._movie_info_plot = QLabel(
-            "Search a title to select it for the room. If OMDB_API_KEY is set, "
-            "live IMDb-sourced plot, cast, year, and rating details will load."
+            "Search a title to select it for the room. The app uses no-key "
+            "public lookup first, with OMDb as an optional richer fallback."
         )
         self._movie_info_plot.setObjectName("movieInfoBody")
         self._movie_info_plot.setWordWrap(True)
@@ -829,6 +837,41 @@ class MainWindow(QMainWindow):
             parsed = load_srt_file(file_path)
         except ValueError as error:
             self._subtitle_status.setText(str(error))
+            return
+
+        subtitles = RoomSubtitleInfo(
+            filename=parsed.filename,
+            content=parsed.content,
+            cue_count=parsed.cue_count,
+        )
+        self._apply_room_subtitles(subtitles)
+        if self._room_target is not None:
+            asyncio.create_task(self._broadcast_subtitles(self._room_target, subtitles))
+
+    def _find_subtitles(self) -> None:
+        if not self.state.is_host:
+            return
+
+        movie_title = self.state.movie_title.strip()
+        if not movie_title or movie_title == "Movie Title":
+            movie_title = self._movie_search_input.text().strip()
+        if not movie_title:
+            self._subtitle_status.setText(
+                "Choose a movie title before finding subtitles."
+            )
+            return
+
+        self._subtitle_status.setText(f"Searching subtitles for {movie_title}...")
+        asyncio.create_task(self._find_subtitles_async(movie_title))
+
+    async def _find_subtitles_async(self, movie_title: str) -> None:
+        try:
+            parsed = await search_opensubtitles_srt(movie_title)
+        except Exception as error:
+            self._subtitle_status.setText(
+                "Could not auto-find subtitles. Add OPENSUBTITLES_API_KEY to .env "
+                f"or choose an .srt manually. Error: {error}"
+            )
             return
 
         subtitles = RoomSubtitleInfo(

@@ -4,6 +4,7 @@ httpx
 websockets
 pydantic
 python-dotenv
+cinemagoer
 pytest
 black
 isort

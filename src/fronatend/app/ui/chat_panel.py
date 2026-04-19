@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import Sequence
 from pathlib import Path
@@ -30,6 +31,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.config import get_settings
+from app.services.gif_service import (
+    GifSearchResult,
+    gif_result_to_attachment,
+    search_tenor_gifs,
+)
 from app.services.room_service import ChatAttachment
 
 
@@ -50,22 +57,154 @@ REACTION_ICONS = {
     reaction: REACTION_ICON_DIR / icon for reaction, _label, icon in REACTION_CHOICES
 }
 
-GIF_LIBRARY: tuple[ChatAttachment, ...] = (
-    ChatAttachment(
-        filename="popcorn.gif",
-        mime_type="image/gif",
-        data_base64="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
-    ),
-    ChatAttachment(
-        filename="movie-night.gif",
-        mime_type="image/gif",
-        data_base64="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
-    ),
-    ChatAttachment(
-        filename="standing-ovation.gif",
-        mime_type="image/gif",
-        data_base64="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
-    ),
+
+def _attachment_display_name(filename: str) -> str:
+    return Path(filename).stem.replace("-", " ").replace("_", " ").title()
+
+
+def _make_demo_gif_base64(background: str, foreground: str, pattern: str) -> str:
+    width = 28
+    height = 18
+    frames = [
+        _pattern_pixels(width, height, pattern, phase=0),
+        _pattern_pixels(width, height, pattern, phase=1),
+    ]
+    gif = _build_two_color_gif(
+        width=width,
+        height=height,
+        background=_hex_to_rgb(background),
+        foreground=_hex_to_rgb(foreground),
+        frames=frames,
+    )
+    return base64.b64encode(gif).decode("ascii")
+
+
+def _pattern_pixels(width: int, height: int, pattern: str, phase: int) -> list[int]:
+    center_x = width // 2
+    center_y = height // 2
+    pixels: list[int] = []
+    for y in range(height):
+        for x in range(width):
+            pixels.append(_pattern_value(x, y, center_x, center_y, pattern, phase))
+    return pixels
+
+
+def _pattern_value(
+    x: int,
+    y: int,
+    center_x: int,
+    center_y: int,
+    pattern: str,
+    phase: int,
+) -> int:
+    if pattern == "sparkle":
+        return int((x + y + phase * 3) % 7 in {0, 1})
+    if pattern == "wipe":
+        return int((x + phase * 7) % 12 < 5)
+    if pattern == "bars":
+        return int((y + phase * 3) % 8 < 4)
+    if pattern == "diamond":
+        return int(abs(x - center_x) + abs(y - center_y) < 7 + phase * 2)
+    if pattern == "rings":
+        distance = abs(x - center_x) + abs(y - center_y)
+        return int(distance % 6 in ({0, 1} if phase == 0 else {2, 3}))
+    if pattern == "cross":
+        return int(abs(x - center_x) < 3 + phase or abs(y - center_y) < 2 + phase)
+    if pattern == "chevron":
+        return int((x + y + phase * 4) % 10 < 3 or (x - y + phase * 4) % 10 < 3)
+    if pattern == "heart":
+        left = (x - center_x + 5) ** 2 + (y - center_y + 3) ** 2 < 24
+        right = (x - center_x - 5) ** 2 + (y - center_y + 3) ** 2 < 24
+        point = abs(x - center_x) + max(0, y - center_y + 1) < 9 + phase
+        return int(left or right or point)
+    return int((x + y + phase) % 2 == 0)
+
+
+def _build_two_color_gif(
+    width: int,
+    height: int,
+    background: tuple[int, int, int],
+    foreground: tuple[int, int, int],
+    frames: Sequence[list[int]],
+) -> bytes:
+    data = bytearray()
+    data.extend(b"GIF89a")
+    data.extend(width.to_bytes(2, "little"))
+    data.extend(height.to_bytes(2, "little"))
+    data.extend(bytes([0x80, 0, 0]))
+    data.extend(bytes(background))
+    data.extend(bytes(foreground))
+    data.extend(b"!\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00")
+
+    for pixels in frames:
+        data.extend(b"!\xf9\x04\x04\x18\x00\x00\x00")
+        data.extend(b",\x00\x00\x00\x00")
+        data.extend(width.to_bytes(2, "little"))
+        data.extend(height.to_bytes(2, "little"))
+        data.extend(b"\x00")
+        data.extend(_gif_image_data(pixels))
+
+    data.extend(b";")
+    return bytes(data)
+
+
+def _gif_image_data(pixels: Sequence[int]) -> bytes:
+    min_code_size = 2
+    clear_code = 1 << min_code_size
+    end_code = clear_code + 1
+    codes: list[int] = [clear_code]
+    for pixel in pixels:
+        codes.append(pixel)
+        codes.append(clear_code)
+    codes.append(end_code)
+
+    packed = _pack_lzw_codes(codes, code_size=min_code_size + 1)
+    blocks = bytearray([min_code_size])
+    for index in range(0, len(packed), 255):
+        chunk = packed[index : index + 255]
+        blocks.append(len(chunk))
+        blocks.extend(chunk)
+    blocks.append(0)
+    return bytes(blocks)
+
+
+def _pack_lzw_codes(codes: Sequence[int], code_size: int) -> bytes:
+    value = 0
+    bit_count = 0
+    output = bytearray()
+    for code in codes:
+        value |= code << bit_count
+        bit_count += code_size
+        while bit_count >= 8:
+            output.append(value & 0xFF)
+            value >>= 8
+            bit_count -= 8
+    if bit_count:
+        output.append(value & 0xFF)
+    return bytes(output)
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    clean_value = value.removeprefix("#")
+    return (
+        int(clean_value[0:2], 16),
+        int(clean_value[2:4], 16),
+        int(clean_value[4:6], 16),
+    )
+
+
+GIF_LIBRARY: tuple[ChatAttachment, ...] = tuple(
+    ChatAttachment(filename=filename, mime_type="image/gif", data_base64=data_base64)
+    for filename, data_base64 in (
+        ("popcorn.gif", _make_demo_gif_base64("#230c33", "#ffd166", "sparkle")),
+        ("movie-night.gif", _make_demo_gif_base64("#17172c", "#30bced", "wipe")),
+        ("standing-ovation.gif", _make_demo_gif_base64("#230c33", "#6bf178", "bars")),
+        ("plot-twist.gif", _make_demo_gif_base64("#17172c", "#fc5130", "diamond")),
+        ("big-laugh.gif", _make_demo_gif_base64("#230c33", "#e0bad7", "rings")),
+        ("mind-blown.gif", _make_demo_gif_base64("#17172c", "#ff9a6c", "cross")),
+        ("rewind-that.gif", _make_demo_gif_base64("#230c33", "#8ec7ff", "chevron")),
+        ("cinema-love.gif", _make_demo_gif_base64("#17172c", "#f55d59", "heart")),
+    )
 )
 
 
@@ -235,7 +374,12 @@ class ChatBubble(QFrame):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
 
-        title = QLabel(attachment.filename)
+        title_text = (
+            _attachment_display_name(attachment.filename)
+            if attachment.mime_type == "image/gif"
+            else attachment.filename
+        )
+        title = QLabel(title_text)
         title.setObjectName("attachmentTitle")
         title.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(title)
@@ -587,7 +731,8 @@ class GifLibraryDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("GIF Library")
         self.setObjectName("gifLibraryDialog")
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(380)
+        self._online_results: list[GifSearchResult] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -597,15 +742,40 @@ class GifLibraryDialog(QDialog):
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
 
+        settings = get_settings()
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("Search built-in GIFs...")
+        self._search_input.setPlaceholderText(
+            "Search Tenor GIFs..."
+            if settings.tenor_api_key
+            else "Search built-in fallback GIFs..."
+        )
+        self._search_input.returnPressed.connect(self._search_online)
         self._search_input.textChanged.connect(self._refresh_results)
         layout.addWidget(self._search_input)
+
+        self._search_button = QPushButton("Search Tenor")
+        self._search_button.setObjectName("gifChoiceButton")
+        self._search_button.setVisible(bool(settings.tenor_api_key))
+        self._search_button.clicked.connect(self._search_online)
+        layout.addWidget(self._search_button)
+
+        self._status_label = QLabel(
+            "Powered by Tenor"
+            if settings.tenor_api_key
+            else "Add TENOR_API_KEY to .env for Discord-style GIF search."
+        )
+        self._status_label.setObjectName("attachmentTitle")
+        self._status_label.setWordWrap(True)
+        layout.addWidget(self._status_label)
 
         self._results = QVBoxLayout()
         self._results.setSpacing(8)
         layout.addLayout(self._results)
         self._refresh_results()
+
+        if settings.tenor_api_key:
+            self._search_input.setText("movie reaction")
+            self._search_online()
 
     def _refresh_results(self) -> None:
         while self._results.count():
@@ -617,17 +787,64 @@ class GifLibraryDialog(QDialog):
                 widget.deleteLater()
 
         query = self._search_input.text().strip().lower()
+        if self._online_results:
+            for result in self._online_results:
+                if query and query not in result.title.lower():
+                    continue
+
+                button = QPushButton(result.title)
+                button.setObjectName("gifChoiceButton")
+                button.clicked.connect(
+                    lambda _checked=False, value=result: self._select_online_gif(value)
+                )
+                self._results.addWidget(button)
+            return
+
         for attachment in GIF_LIBRARY:
-            label = attachment.filename.replace("-", " ").replace(".gif", "")
+            label = _attachment_display_name(attachment.filename)
             if query and query not in label.lower():
                 continue
 
-            button = QPushButton(label.title())
+            button = QPushButton(label)
             button.setObjectName("gifChoiceButton")
             button.clicked.connect(
                 lambda _checked=False, value=attachment: self._select_gif(value)
             )
             self._results.addWidget(button)
+
+    def _search_online(self) -> None:
+        query = self._search_input.text().strip() or "movie reaction"
+        self._status_label.setText(f"Searching Tenor for {query}...")
+        self._search_button.setEnabled(False)
+        asyncio.create_task(self._search_online_async(query))
+
+    async def _search_online_async(self, query: str) -> None:
+        try:
+            self._online_results = await search_tenor_gifs(query)
+        except Exception as error:
+            self._online_results = []
+            self._status_label.setText(
+                f"Tenor search failed: {error}. Showing built-in fallback GIFs."
+            )
+        else:
+            count = len(self._online_results)
+            self._status_label.setText(f"Powered by Tenor · {count} results")
+        finally:
+            self._search_button.setEnabled(True)
+            self._refresh_results()
+
+    def _select_online_gif(self, result: GifSearchResult) -> None:
+        self._status_label.setText(f"Adding {result.title}...")
+        asyncio.create_task(self._select_online_gif_async(result))
+
+    async def _select_online_gif_async(self, result: GifSearchResult) -> None:
+        try:
+            attachment = await gif_result_to_attachment(result)
+        except Exception as error:
+            self._status_label.setText(f"Could not add GIF: {error}")
+            return
+
+        self._select_gif(attachment)
 
     def _select_gif(self, attachment: ChatAttachment) -> None:
         self.gif_selected.emit(attachment)
