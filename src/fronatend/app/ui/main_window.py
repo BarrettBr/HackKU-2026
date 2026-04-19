@@ -410,11 +410,16 @@ class MainWindow(QMainWindow):
         self._invite_link_field = QLineEdit()
         self._invite_link_field.setObjectName("inviteLinkField")
         self._invite_link_field.setReadOnly(True)
-        self._invite_link_field.setPlaceholderText("Invite link appears here for hosts")
+        self._invite_link_field.setPlaceholderText("Invite code appears here for hosts")
+        self._invite_link_field.setMinimumWidth(420)
+        self._invite_link_field.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         self._invite_link_field.hide()
-        layout.addWidget(self._invite_link_field)
+        layout.addWidget(self._invite_link_field, 1)
 
-        layout.addStretch()
+        layout.addStretch(0)
 
         movie_info_button = QPushButton("IMDb")
         movie_info_button.setObjectName("ghostButton")
@@ -515,27 +520,43 @@ class MainWindow(QMainWindow):
         self._landing_status.setText("Connecting to host...")
         try:
             target = parse_join_target(invite)
+        except Exception as error:
+            self._landing_status.setText(f"Invalid invite code: {error}")
+            return
+
+        try:
             room = await self._room_client.join(invite)
-            subscription = await self._engine_runtime.subscribe_watcher(target)
         except Exception as error:
             self._landing_status.setText(f"Could not join room: {error}")
-            if "target" in locals():
-                try:
-                    await self._room_client.leave(target)
-                except Exception:
-                    pass
             return
+
+        subscription: WatcherSubscription | None = None
+        stream_error = ""
+        try:
+            subscription = await self._engine_runtime.subscribe_watcher(target)
+        except Exception as error:
+            stream_error = str(error)
 
         self._apply_room_info(room=room, is_host=False)
         self._room_target = target
-        self._start_video_consumer(subscription)
-        if self._video_connect_task is not None:
-            self._video_connect_task.cancel()
-            self._video_connect_task = None
-        self._video_connect_task = asyncio.create_task(
-            self._ensure_video_consumer_ready(target, subscription)
-        )
-        self._landing_status.setText(f"Connected to {room.room_name}.")
+        if subscription is not None:
+            self._start_video_consumer(subscription)
+            if self._video_connect_task is not None:
+                self._video_connect_task.cancel()
+                self._video_connect_task = None
+            self._video_connect_task = asyncio.create_task(
+                self._ensure_video_consumer_ready(target, subscription)
+            )
+            self._landing_status.setText(f"Connected to {room.room_name}.")
+        else:
+            self._status_label.setText("Joined room. Waiting for video engine...")
+            self._landing_status.setText(
+                f"Joined {room.room_name}. Video stream is not connected yet."
+            )
+            self.statusBar().showMessage(
+                f"Joined chat. Video engine unavailable: {stream_error}",
+                5000,
+            )
         self._show_room()
 
     async def _ensure_video_consumer_ready(
@@ -549,7 +570,11 @@ class MainWindow(QMainWindow):
 
         for _ in range(80):  # ~20s max wait
             await asyncio.sleep(0.25)
-            latest = await self._engine_runtime.get_subscription(target)
+            try:
+                latest = await self._engine_runtime.get_subscription(target)
+            except Exception:
+                self._status_label.setText("Video engine disconnected.")
+                return
             if latest.ipc_path and Path(latest.ipc_path).exists():
                 self._start_video_consumer(latest)
                 return
@@ -570,9 +595,7 @@ class MainWindow(QMainWindow):
 
         self._room_name_label.setText(room.room_name)
         self._connection_label.setText(self.state.connection_status)
-        self._invite_link_field.setText(
-            room.invite_link if is_host else room.compact_code
-        )
+        self._invite_link_field.setText(room.compact_code)
         self._invite_link_field.hide()
         self._last_message_id = 0
         self._chat_panel.clear_messages()
@@ -1096,10 +1119,11 @@ class MainWindow(QMainWindow):
             return
 
         self._invite_link_field.show()
+        self._invite_link_field.setText(self.state.compact_room_code)
         self._invite_link_field.setFocus()
         self._invite_link_field.selectAll()
         self.statusBar().showMessage(
-            f"Invite link selected. Code: {self.state.compact_room_code}", 5000
+            "Invite code selected. Teammates can paste it into Join Room.", 5000
         )
 
     def _leave_room(self) -> None:
@@ -1663,8 +1687,6 @@ class MainWindow(QMainWindow):
                 background: rgba(255, 255, 255, 0.06);
                 color: rgba(255, 255, 255, 0.76);
                 border: 1px solid rgba(255, 255, 255, 0.08);
-                min-width: 360px;
-                max-width: 460px;
                 font-size: 12px;
                 padding: 10px 12px;
             }

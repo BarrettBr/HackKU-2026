@@ -799,9 +799,7 @@ class EngineRuntimeClient:
     async def unsubscribe(self, target: JoinTarget) -> None:
         _ = target
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                f"{self._base_url()}/unsubscribe", json={}
-            )
+            response = await client.post(f"{self._base_url()}/unsubscribe", json={})
             response.raise_for_status()
 
     async def get_subscription(self, target: JoinTarget) -> WatcherSubscription:

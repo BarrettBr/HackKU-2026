@@ -39,6 +39,11 @@ def test_parse_compact_room_code() -> None:
     assert target.port == 4321
 
 
+def test_parse_plain_room_id_explains_host_info_required() -> None:
+    with pytest.raises(ValueError, match="ROOM@host:port"):
+        parse_join_target("MN-ABC123")
+
+
 @pytest.mark.anyio
 async def test_host_room_accepts_join_from_invite_link() -> None:
     host = RoomHostService(display_name="Host")
