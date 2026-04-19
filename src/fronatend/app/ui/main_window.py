@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -93,6 +93,7 @@ class MainWindow(QMainWindow):
         self._video_consumer_started_ts: float = 0.0
         self._last_video_frame_ts: float = 0.0
         self._last_video_recover_ts: float = 0.0
+        self._latest_video_pixmap: QPixmap | None = None
         self._last_message_id = 0
         self._author_colors: dict[str, str] = {}
         self._author_avatars: dict[str, str] = {}
@@ -304,6 +305,13 @@ class MainWindow(QMainWindow):
         self._chat_panel.poll_end_sent.connect(self._end_poll)
         self._splitter.addWidget(self._chat_panel)
         self._splitter.setSizes([1000, 420])
+        # Debug stability mode: disable manual splitter dragging so sidebar width
+        # changes only through app controls, not user drag gestures.
+        self._splitter.setHandleWidth(0)
+        self._splitter.handle(1).setEnabled(False)
+        self._splitter.splitterMoved.connect(
+            lambda _pos, _index: self._render_current_video_frame()
+        )
         return shell
 
     def _build_top_bar(self) -> QFrame:
@@ -569,20 +577,24 @@ class MainWindow(QMainWindow):
         target: JoinTarget,
         subscription: WatcherSubscription,
     ) -> None:
-        if subscription.ipc_path and Path(subscription.ipc_path).exists():
-            self._start_video_consumer(subscription)
-            return
+        try:
+            if subscription.ipc_path and Path(subscription.ipc_path).exists():
+                self._start_video_consumer(subscription)
+                return
 
-        for attempt in range(120):  # ~16s max wait with faster initial polling
-            await asyncio.sleep(0.05 if attempt < 40 else 0.2)
-            try:
-                latest = await self._engine_runtime.get_subscription(target)
-            except Exception:
-                self._status_label.setText("Video engine disconnected.")
-                return
-            if latest.ipc_path and Path(latest.ipc_path).exists():
-                self._start_video_consumer(latest)
-                return
+            for attempt in range(120):  # ~16s max wait with faster initial polling
+                await asyncio.sleep(0.05 if attempt < 40 else 0.2)
+                try:
+                    latest = await self._engine_runtime.get_subscription(target)
+                except Exception:
+                    self._status_label.setText("Video engine disconnected.")
+                    return
+                if latest.ipc_path and Path(latest.ipc_path).exists():
+                    self._start_video_consumer(latest)
+                    return
+        finally:
+            if self._video_connect_task is asyncio.current_task():
+                self._video_connect_task = None
 
     async def _recover_video_consumer(self) -> None:
         try:
@@ -1174,10 +1186,18 @@ class MainWindow(QMainWindow):
             pass
 
     def _start_video_consumer(self, subscription: WatcherSubscription) -> None:
-        self._stop_video_consumer()
         if not subscription.ipc_path:
             self._status_label.setText("Waiting for stream...")
             return
+        if (
+            self._ipc_consumer is not None
+            and self._current_ipc_path == subscription.ipc_path
+        ):
+            self._status_label.setText("")
+            if not self._video_frame_timer.isActive():
+                self._video_frame_timer.start()
+            return
+        self._stop_video_consumer(clear_frame=False, cancel_recover=False)
         try:
             consumer = IPCVideoConsumer(subscription.ipc_path)
             consumer.open()
@@ -1190,11 +1210,22 @@ class MainWindow(QMainWindow):
         except Exception as error:
             self._status_label.setText(f"Video init failed: {error}")
 
-    def _stop_video_consumer(self) -> None:
-        if self._video_connect_task is not None:
+    def _stop_video_consumer(
+        self,
+        clear_frame: bool = True,
+        cancel_recover: bool = True,
+    ) -> None:
+        if (
+            self._video_connect_task is not None
+            and self._video_connect_task is not asyncio.current_task()
+        ):
             self._video_connect_task.cancel()
             self._video_connect_task = None
-        if self._video_recover_task is not None:
+        if (
+            cancel_recover
+            and self._video_recover_task is not None
+            and self._video_recover_task is not asyncio.current_task()
+        ):
             self._video_recover_task.cancel()
             self._video_recover_task = None
         self._video_frame_timer.stop()
@@ -1205,13 +1236,15 @@ class MainWindow(QMainWindow):
         self._video_consumer_started_ts = 0.0
         self._last_video_frame_ts = 0.0
         self._last_video_recover_ts = 0.0
-        if hasattr(self, "_video_frame_label"):
+        if clear_frame:
+            self._latest_video_pixmap = None
+        if clear_frame and hasattr(self, "_video_frame_label"):
             self._video_frame_label.clear()
         if hasattr(self, "_status_label"):
             self._status_label.setText("")
-        if hasattr(self, "_stream_eyebrow_label"):
+        if clear_frame and hasattr(self, "_stream_eyebrow_label"):
             self._stream_eyebrow_label.show()
-        if hasattr(self, "_video_title_label"):
+        if clear_frame and hasattr(self, "_video_title_label"):
             self._video_title_label.show()
 
     def _pump_video_frame(self) -> None:
@@ -1235,8 +1268,6 @@ class MainWindow(QMainWindow):
                 and (stalled_before_first_frame or stalled_after_frames)
                 and (now - self._last_video_recover_ts) > 8.0
             ):
-                # Prevent showing an old frozen frame forever.
-                self._video_frame_label.clear()
                 self._status_label.setText("Recovering stream...")
                 self._last_video_recover_ts = now
                 self._video_recover_task = asyncio.create_task(
@@ -1244,14 +1275,25 @@ class MainWindow(QMainWindow):
                 )
             return
         self._last_video_frame_ts = time.monotonic()
+        self._latest_video_pixmap = pixmap
         self._status_label.setText("")
         if hasattr(self, "_stream_eyebrow_label"):
             self._stream_eyebrow_label.hide()
         if hasattr(self, "_video_title_label"):
             self._video_title_label.hide()
+        self._render_current_video_frame()
+
+    def _render_current_video_frame(self) -> None:
+        if self._latest_video_pixmap is None:
+            return
+        if not hasattr(self, "_video_frame_label"):
+            return
+        target_size = self._video_frame_label.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
         self._video_frame_label.setPixmap(
-            pixmap.scaled(
-                self._video_frame_label.size(),
+            self._latest_video_pixmap.scaled(
+                target_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
@@ -1311,6 +1353,10 @@ class MainWindow(QMainWindow):
             self._toggle_pause()
             return
         super().keyPressEvent(event)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._render_current_video_frame()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(

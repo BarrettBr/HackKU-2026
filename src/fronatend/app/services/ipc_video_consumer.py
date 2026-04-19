@@ -28,6 +28,7 @@ class IPCVideoConsumer:
         self._mmap: mmap.mmap | None = None
         self._header: IPCHeader | None = None
         self._last_seq = 0
+        self._last_frame_counter = 0
 
     def open(self) -> None:
         self.close()
@@ -45,6 +46,7 @@ class IPCVideoConsumer:
             self._fd = None
         self._header = None
         self._last_seq = 0
+        self._last_frame_counter = 0
 
     def read_latest_pixmap(self) -> QPixmap | None:
         if self._mmap is None or self._header is None:
@@ -54,6 +56,10 @@ class IPCVideoConsumer:
         frame_counter = struct.unpack_from("<Q", self._mmap, 48)[0]
         if frame_counter == 0:
             return None
+        if frame_counter < self._last_frame_counter:
+            # Writer restarted and reset counters.
+            self._last_seq = 0
+            self._last_frame_counter = 0
 
         # Try newest slot first, then fall back to older slots if the newest
         # one is being written concurrently.
@@ -81,6 +87,7 @@ class IPCVideoConsumer:
                 continue
 
             self._last_seq = seq_after
+            self._last_frame_counter = frame_counter
             return pixmap
         return None
 

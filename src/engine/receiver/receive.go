@@ -143,6 +143,12 @@ func (s *Service) Run() error {
 					if errors.Is(err, ErrNoFrameReady) {
 						continue
 					}
+					// If ffmpeg decoder enters a bad state on one access unit,
+					// recreate it on the next frame instead of stalling forever.
+					if s.decoder != nil {
+						_ = s.decoder.Close()
+						s.decoder = nil
+					}
 					s.decodeErrors.Add(1)
 					// Drop bad samples and keep the receiver alive.
 					continue
