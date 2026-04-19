@@ -293,6 +293,9 @@ class MainWindow(QMainWindow):
         self._chat_panel.file_sent.connect(self._handle_local_file)
         self._chat_panel.gif_sent.connect(self._handle_local_gif)
         self._chat_panel.reaction_sent.connect(self._send_reaction)
+        self._chat_panel.poll_created.connect(self._handle_local_poll)
+        self._chat_panel.poll_vote_sent.connect(self._send_poll_vote)
+        self._chat_panel.poll_end_sent.connect(self._end_poll)
         self._splitter.addWidget(self._chat_panel)
         self._splitter.setSizes([1000, 420])
         return shell
@@ -573,6 +576,7 @@ class MainWindow(QMainWindow):
         self._invite_link_field.hide()
         self._last_message_id = 0
         self._chat_panel.clear_messages()
+        self._chat_panel.set_room_context(self._room_client.display_name, is_host)
         self._refresh_participants(room.participants)
         self._apply_pause_state(room.is_paused)
         if room.movie is not None:
@@ -630,6 +634,15 @@ class MainWindow(QMainWindow):
             return
         asyncio.create_task(self._send_gif_async(self._room_target, attachment))
 
+    def _handle_local_poll(self, prompt: str, options: list[str]) -> None:
+        if self._room_target is None:
+            self.statusBar().showMessage("Join or create a room before polling.", 2500)
+            return
+        if not self.state.is_host:
+            self.statusBar().showMessage("Only the host can create polls.", 2500)
+            return
+        asyncio.create_task(self._send_poll_async(self._room_target, prompt, options))
+
     def _send_reaction(self, message_id: int, reaction: str) -> None:
         if self._room_target is None:
             self.statusBar().showMessage("Join or create a room before reacting.", 2500)
@@ -637,6 +650,22 @@ class MainWindow(QMainWindow):
         asyncio.create_task(
             self._send_reaction_async(self._room_target, message_id, reaction)
         )
+
+    def _send_poll_vote(self, message_id: int, option_index: int) -> None:
+        if self._room_target is None:
+            self.statusBar().showMessage("Join or create a room before voting.", 2500)
+            return
+        asyncio.create_task(
+            self._send_poll_vote_async(self._room_target, message_id, option_index)
+        )
+
+    def _end_poll(self, message_id: int) -> None:
+        if self._room_target is None:
+            return
+        if not self.state.is_host:
+            self.statusBar().showMessage("Only the host can end polls.", 2500)
+            return
+        asyncio.create_task(self._end_poll_async(self._room_target, message_id))
 
     async def _send_chat_message_async(self, target: JoinTarget, message: str) -> None:
         try:
@@ -686,6 +715,44 @@ class MainWindow(QMainWindow):
             return
         self._append_chat_message(chat_message)
 
+    async def _send_poll_async(
+        self,
+        target: JoinTarget,
+        prompt: str,
+        options: list[str],
+    ) -> None:
+        try:
+            chat_message = await self._room_client.send_poll(target, prompt, options)
+        except Exception as error:
+            self.statusBar().showMessage(f"Poll failed: {error}", 3000)
+            return
+        self._append_chat_message(chat_message)
+
+    async def _send_poll_vote_async(
+        self,
+        target: JoinTarget,
+        message_id: int,
+        option_index: int,
+    ) -> None:
+        try:
+            chat_message = await self._room_client.vote_poll(
+                target,
+                message_id,
+                option_index,
+            )
+        except Exception as error:
+            self.statusBar().showMessage(f"Vote failed: {error}", 3000)
+            return
+        self._append_chat_message(chat_message)
+
+    async def _end_poll_async(self, target: JoinTarget, message_id: int) -> None:
+        try:
+            chat_message = await self._room_client.end_poll(target, message_id)
+        except Exception as error:
+            self.statusBar().showMessage(f"Could not end poll: {error}", 3000)
+            return
+        self._append_chat_message(chat_message)
+
     def _poll_room(self) -> None:
         if self._stack.currentWidget() is not self._room_shell:
             return
@@ -725,6 +792,7 @@ class MainWindow(QMainWindow):
             author_color=self._color_for_author(message.author),
             is_host=message.author == self._host_name(),
             attachment=message.attachment,
+            poll=message.poll,
             reactions=tuple(message.reactions.items()),
         )
 
@@ -1282,6 +1350,10 @@ class MainWindow(QMainWindow):
                 background: rgba(255, 255, 255, 0.07);
                 border-radius: 14px;
             }
+            QFrame#pollCard {
+                background: rgba(10, 9, 20, 0.42);
+                border-radius: 14px;
+            }
             QDialog#participantDialog {
                 background: #17172c;
                 border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1372,6 +1444,16 @@ class MainWindow(QMainWindow):
                 font-size: 13px;
                 font-weight: 700;
             }
+            QLabel#pollPrompt {
+                color: #ffffff;
+                font-size: 16px;
+                font-weight: 800;
+            }
+            QLabel#pollStatus {
+                color: rgba(255, 255, 255, 0.58);
+                font-size: 12px;
+                font-weight: 700;
+            }
             QLabel#attachmentImage {
                 background: transparent;
                 border-radius: 10px;
@@ -1410,6 +1492,24 @@ class MainWindow(QMainWindow):
             QPushButton#bubbleReactionButton:hover {
                 background: rgba(255, 255, 255, 0.1);
                 border: 1px solid rgba(255, 255, 255, 0.12);
+            }
+            QPushButton#pollOptionButton {
+                text-align: left;
+                background: rgba(48, 188, 237, 0.08);
+                border: 1px solid rgba(48, 188, 237, 0.24);
+                color: rgba(255, 255, 255, 0.9);
+                border-radius: 12px;
+                padding: 10px 12px;
+                font-weight: 700;
+            }
+            QPushButton#pollOptionButton:hover {
+                background: rgba(48, 188, 237, 0.16);
+                border: 1px solid rgba(48, 188, 237, 0.42);
+            }
+            QPushButton#pollOptionButton:disabled {
+                color: rgba(255, 255, 255, 0.62);
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.1);
             }
             QPushButton#avatarChip {
                 font-family: "Apple Color Emoji", "Noto Color Emoji", "Segoe UI Emoji", "Twemoji Mozilla", sans-serif;

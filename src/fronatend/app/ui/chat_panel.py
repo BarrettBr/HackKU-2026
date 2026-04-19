@@ -37,7 +37,7 @@ from app.services.gif_service import (
     gif_result_to_attachment,
     search_giphy_gifs,
 )
-from app.services.room_service import ChatAttachment
+from app.services.room_service import ChatAttachment, ChatPoll
 
 
 REACTION_ICON_DIR = Path(__file__).resolve().parents[1] / "assets" / "reactions"
@@ -276,6 +276,8 @@ class ComposerInput(QTextEdit):
 class ChatBubble(QFrame):
     clicked = Signal(int)
     reaction_requested = Signal(int, str)
+    poll_vote_requested = Signal(int, int)
+    poll_end_requested = Signal(int)
 
     def __init__(
         self,
@@ -285,7 +287,10 @@ class ChatBubble(QFrame):
         author_color: str,
         is_host: bool = False,
         attachment: ChatAttachment | None = None,
+        poll: ChatPoll | None = None,
         reactions: Sequence[tuple[str, int]] | None = None,
+        can_end_poll: bool = False,
+        current_user: str = "",
     ) -> None:
         super().__init__()
         self.setObjectName("chatBubble")
@@ -296,6 +301,10 @@ class ChatBubble(QFrame):
         self._gif_movies: list[QMovie] = []
         self._selected = False
         self._author_color = author_color
+        self._poll: ChatPoll | None = None
+        self._poll_widget: PollWidget | None = None
+        self._can_end_poll = can_end_poll
+        self._current_user = current_user
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(20, 16, 20, 16)
@@ -334,6 +343,9 @@ class ChatBubble(QFrame):
 
         if attachment is not None:
             self._layout.addWidget(self._build_attachment_preview(attachment))
+
+        if poll is not None:
+            self.set_poll(poll)
 
         if reactions:
             self.set_reactions(dict(reactions))
@@ -489,12 +501,103 @@ class ChatBubble(QFrame):
 
         pill.set_count(pill.count() + increment)
 
+    def set_poll(self, poll: ChatPoll) -> None:
+        self._poll = poll
+        if self._poll_widget is None:
+            self._poll_widget = PollWidget(
+                message_id=self.message_id,
+                poll=poll,
+                current_user=self._current_user,
+                can_end=self._can_end_poll,
+            )
+            self._poll_widget.vote_requested.connect(self.poll_vote_requested.emit)
+            self._poll_widget.end_requested.connect(self.poll_end_requested.emit)
+            self._layout.addWidget(self._poll_widget)
+            return
+
+        self._poll_widget.update_poll(poll)
+
+
+class PollWidget(QFrame):
+    vote_requested = Signal(int, int)
+    end_requested = Signal(int)
+
+    def __init__(
+        self,
+        message_id: int,
+        poll: ChatPoll,
+        current_user: str,
+        can_end: bool,
+    ) -> None:
+        super().__init__()
+        self.setObjectName("pollCard")
+        self._message_id = message_id
+        self._current_user = current_user
+        self._can_end = can_end
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(14, 14, 14, 14)
+        self._layout.setSpacing(10)
+        self.update_poll(poll)
+
+    def update_poll(self, poll: ChatPoll) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        title = QLabel(poll.prompt)
+        title.setObjectName("pollPrompt")
+        title.setWordWrap(True)
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        self._layout.addWidget(title)
+
+        total_votes = sum(max(0, count) for count in poll.votes.values())
+        selected_index = poll.voters.get(self._current_user)
+        for index, option in enumerate(poll.options):
+            count = max(0, poll.votes.get(str(index), 0))
+            percent = int((count / total_votes) * 100) if total_votes else 0
+            label = f"{option} · {count} vote{'s' if count != 1 else ''}"
+            if total_votes:
+                label = f"{label} · {percent}%"
+            if selected_index == index:
+                label = f"✓ {label}"
+
+            button = QPushButton(label)
+            button.setObjectName("pollOptionButton")
+            button.setEnabled(not poll.ended)
+            button.clicked.connect(
+                lambda _checked=False, value=index: self.vote_requested.emit(
+                    self._message_id,
+                    value,
+                )
+            )
+            self._layout.addWidget(button)
+
+        status = QLabel("Poll ended" if poll.ended else f"{total_votes} total votes")
+        status.setObjectName("pollStatus")
+        self._layout.addWidget(status)
+
+        if self._can_end and not poll.ended:
+            end_button = QPushButton("End poll")
+            end_button.setObjectName("downloadButton")
+            end_button.clicked.connect(
+                lambda: self.end_requested.emit(self._message_id)
+            )
+            self._layout.addWidget(end_button, 0, Qt.AlignmentFlag.AlignLeft)
+
 
 class ChatPanel(QFrame):
     message_sent = Signal(str)
     reaction_sent = Signal(int, str)
     file_sent = Signal(str)
     gif_sent = Signal(object)
+    poll_created = Signal(str, object)
+    poll_vote_sent = Signal(int, int)
+    poll_end_sent = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -505,6 +608,8 @@ class ChatPanel(QFrame):
         self._message_cards: list[ChatBubble] = []
         self._message_cards_by_id: dict[int, ChatBubble] = {}
         self._selected_message_id: int | None = None
+        self._current_user = ""
+        self._is_host = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -623,10 +728,13 @@ class ChatPanel(QFrame):
         author_color: str = "#E0BAD7",
         is_host: bool = False,
         attachment: ChatAttachment | None = None,
+        poll: ChatPoll | None = None,
         reactions: Sequence[tuple[str, int]] | None = None,
     ) -> None:
         existing = self._message_cards_by_id.get(message_id)
         if existing is not None:
+            if poll is not None:
+                existing.set_poll(poll)
             existing.set_reactions(dict(reactions or ()))
             return
 
@@ -637,10 +745,15 @@ class ChatPanel(QFrame):
             author_color=author_color,
             is_host=is_host,
             attachment=attachment,
+            poll=poll,
             reactions=reactions,
+            can_end_poll=self._is_host,
+            current_user=self._current_user,
         )
         bubble.clicked.connect(self.select_message)
         bubble.reaction_requested.connect(self.reaction_sent.emit)
+        bubble.poll_vote_requested.connect(self.poll_vote_sent.emit)
+        bubble.poll_end_requested.connect(self.poll_end_sent.emit)
         self._message_cards.append(bubble)
         self._message_cards_by_id[message_id] = bubble
         self._messages_layout.insertWidget(self._messages_layout.count() - 1, bubble)
@@ -688,6 +801,10 @@ class ChatPanel(QFrame):
         if file_path:
             self.file_sent.emit(file_path)
 
+    def set_room_context(self, current_user: str, is_host: bool) -> None:
+        self._current_user = current_user
+        self._is_host = is_host
+
     def _show_attach_menu(self, button: QPushButton) -> None:
         menu = QMenu(self)
         attach_action = QAction(action_icon("attach"), "Attach file", menu)
@@ -698,11 +815,20 @@ class ChatPanel(QFrame):
         gif_action.triggered.connect(self._show_gif_library)
         menu.addAction(gif_action)
 
+        poll_action = QAction("Create poll", menu)
+        poll_action.triggered.connect(self._show_poll_dialog)
+        menu.addAction(poll_action)
+
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
     def _show_gif_library(self) -> None:
         dialog = GifLibraryDialog(self)
         dialog.gif_selected.connect(self.gif_sent.emit)
+        dialog.exec()
+
+    def _show_poll_dialog(self) -> None:
+        dialog = PollComposerDialog(self)
+        dialog.poll_created.connect(self.poll_created.emit)
         dialog.exec()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # type: ignore[override]
@@ -848,4 +974,77 @@ class GifLibraryDialog(QDialog):
 
     def _select_gif(self, attachment: ChatAttachment) -> None:
         self.gif_selected.emit(attachment)
+        self.accept()
+
+
+class PollComposerDialog(QDialog):
+    poll_created = Signal(str, object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Create Poll")
+        self.setObjectName("gifLibraryDialog")
+        self.setMinimumWidth(380)
+        self._option_inputs: list[QLineEdit] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Create a poll")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        self._prompt_input = QLineEdit()
+        self._prompt_input.setPlaceholderText("Poll question...")
+        layout.addWidget(self._prompt_input)
+
+        self._options_layout = QVBoxLayout()
+        self._options_layout.setSpacing(8)
+        layout.addLayout(self._options_layout)
+        self._add_option_input("Option 1")
+        self._add_option_input("Option 2")
+
+        add_option_button = QPushButton("Add option")
+        add_option_button.setObjectName("gifChoiceButton")
+        add_option_button.clicked.connect(lambda: self._add_option_input())
+        layout.addWidget(add_option_button)
+
+        self._error_label = QLabel("")
+        self._error_label.setObjectName("pollStatus")
+        self._error_label.setWordWrap(True)
+        layout.addWidget(self._error_label)
+
+        create_button = QPushButton("Post poll")
+        create_button.setObjectName("primaryButton")
+        create_button.clicked.connect(self._create_poll)
+        layout.addWidget(create_button)
+
+    def _add_option_input(self, placeholder: str | None = None) -> None:
+        if len(self._option_inputs) >= 8:
+            self._error_label.setText("Polls can have up to 8 options.")
+            return
+
+        option_input = QLineEdit()
+        option_input.setPlaceholderText(
+            placeholder or f"Option {len(self._option_inputs) + 1}"
+        )
+        self._option_inputs.append(option_input)
+        self._options_layout.addWidget(option_input)
+
+    def _create_poll(self) -> None:
+        prompt = self._prompt_input.text().strip()
+        options = [
+            option_input.text().strip()
+            for option_input in self._option_inputs
+            if option_input.text().strip()
+        ]
+        if not prompt:
+            self._error_label.setText("Add a poll question first.")
+            return
+        if len(options) < 2:
+            self._error_label.setText("Add at least two options.")
+            return
+
+        self.poll_created.emit(prompt, options)
         self.accept()

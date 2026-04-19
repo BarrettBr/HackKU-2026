@@ -74,11 +74,21 @@ class ChatAttachment:
 
 
 @dataclass(frozen=True)
+class ChatPoll:
+    prompt: str
+    options: list[str]
+    votes: dict[str, int] = field(default_factory=dict)
+    voters: dict[str, int] = field(default_factory=dict)
+    ended: bool = False
+
+
+@dataclass(frozen=True)
 class ChatMessage:
     id: int
     author: str
     text: str
     attachment: ChatAttachment | None = None
+    poll: ChatPoll | None = None
     reactions: dict[str, int] = field(default_factory=dict)
 
 
@@ -188,6 +198,10 @@ class RoomHostService:
             status, payload = self._handle_post_message(body)
         elif method == "POST" and path == "/reactions":
             status, payload = self._handle_post_reaction(body)
+        elif method == "POST" and path == "/polls/vote":
+            status, payload = self._handle_poll_vote(body)
+        elif method == "POST" and path == "/polls/end":
+            status, payload = self._handle_poll_end(body)
         elif method == "POST" and path == "/playback":
             status, payload = self._handle_playback(body)
         elif method == "POST" and path == "/movie":
@@ -271,7 +285,8 @@ class RoomHostService:
         author = str(data.get("author") or "Viewer")
         text = str(data.get("text") or "").strip()
         attachment = _attachment_from_payload(data.get("attachment"))
-        if not text and attachment is None:
+        poll = _poll_from_payload(data.get("poll"))
+        if not text and attachment is None and poll is None:
             return 400, {"ok": False, "error": "message cannot be empty"}
 
         message = ChatMessage(
@@ -279,6 +294,7 @@ class RoomHostService:
             author=author,
             text=text,
             attachment=attachment,
+            poll=poll,
         )
         self._next_message_id += 1
         self._messages.append(message)
@@ -315,6 +331,84 @@ class RoomHostService:
             reactions = dict(message.reactions)
             reactions[reaction] = reactions.get(reaction, 0) + 1
             updated_message = replace(message, reactions=reactions)
+            self._messages[index] = updated_message
+            return 200, {
+                "ok": True,
+                "message": _message_payload(updated_message),
+                "room": self._room_payload(),
+            }
+
+        return 404, {"ok": False, "error": "message not found"}
+
+    def _handle_poll_vote(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        if self.room is None:
+            return 503, {"ok": False, "error": "room is not active"}
+
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return 400, {"ok": False, "error": "invalid JSON"}
+
+        if data.get("room_id") != self.room.room_id:
+            return 404, {"ok": False, "error": "room ID does not match this host"}
+
+        message_id = int(data.get("message_id") or 0)
+        voter = str(data.get("voter") or "Viewer")
+        option_index = int(data.get("option_index") or -1)
+
+        for index, message in enumerate(self._messages):
+            if message.id != message_id:
+                continue
+            if message.poll is None:
+                return 400, {"ok": False, "error": "message is not a poll"}
+            if message.poll.ended:
+                return 400, {"ok": False, "error": "poll is ended"}
+            if option_index < 0 or option_index >= len(message.poll.options):
+                return 400, {"ok": False, "error": "poll option is invalid"}
+
+            votes = dict(message.poll.votes)
+            voters = dict(message.poll.voters)
+            previous_vote = voters.get(voter)
+            if previous_vote is not None:
+                previous_key = str(previous_vote)
+                votes[previous_key] = max(0, votes.get(previous_key, 0) - 1)
+
+            option_key = str(option_index)
+            votes[option_key] = votes.get(option_key, 0) + 1
+            voters[voter] = option_index
+            updated_poll = replace(message.poll, votes=votes, voters=voters)
+            updated_message = replace(message, poll=updated_poll)
+            self._messages[index] = updated_message
+            return 200, {
+                "ok": True,
+                "message": _message_payload(updated_message),
+                "room": self._room_payload(),
+            }
+
+        return 404, {"ok": False, "error": "message not found"}
+
+    def _handle_poll_end(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        if self.room is None:
+            return 503, {"ok": False, "error": "room is not active"}
+
+        try:
+            data = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return 400, {"ok": False, "error": "invalid JSON"}
+
+        if data.get("room_id") != self.room.room_id:
+            return 404, {"ok": False, "error": "room ID does not match this host"}
+        if str(data.get("author") or "") != self.display_name:
+            return 403, {"ok": False, "error": "only the host can end polls"}
+
+        message_id = int(data.get("message_id") or 0)
+        for index, message in enumerate(self._messages):
+            if message.id != message_id:
+                continue
+            if message.poll is None:
+                return 400, {"ok": False, "error": "message is not a poll"}
+
+            updated_message = replace(message, poll=replace(message.poll, ended=True))
             self._messages[index] = updated_message
             return 200, {
                 "ok": True,
@@ -527,6 +621,64 @@ class RoomClient:
 
         return chat_message_from_payload(payload["message"])
 
+    async def send_poll(
+        self,
+        target: JoinTarget,
+        prompt: str,
+        options: list[str],
+    ) -> ChatMessage:
+        poll = ChatPoll(prompt=prompt, options=options)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/messages",
+                json={
+                    "room_id": target.room_id,
+                    "author": self.display_name,
+                    "text": prompt,
+                    "poll": _poll_payload(poll),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return chat_message_from_payload(payload["message"])
+
+    async def vote_poll(
+        self,
+        target: JoinTarget,
+        message_id: int,
+        option_index: int,
+    ) -> ChatMessage:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/polls/vote",
+                json={
+                    "room_id": target.room_id,
+                    "voter": self.display_name,
+                    "message_id": message_id,
+                    "option_index": option_index,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return chat_message_from_payload(payload["message"])
+
+    async def end_poll(self, target: JoinTarget, message_id: int) -> ChatMessage:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"http://{target.host}:{target.port}/polls/end",
+                json={
+                    "room_id": target.room_id,
+                    "author": self.display_name,
+                    "message_id": message_id,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        return chat_message_from_payload(payload["message"])
+
     async def send_reaction(
         self,
         target: JoinTarget,
@@ -688,6 +840,7 @@ def chat_message_from_payload(message: dict[str, Any]) -> ChatMessage:
         author=str(message["author"]),
         text=str(message["text"]),
         attachment=_attachment_from_payload(message.get("attachment")),
+        poll=_poll_from_payload(message.get("poll")),
         reactions={
             str(reaction): int(count)
             for reaction, count in dict(message.get("reactions") or {}).items()
@@ -772,6 +925,7 @@ def _message_payload(message: ChatMessage) -> dict[str, Any]:
             if message.attachment is not None
             else None
         ),
+        "poll": _poll_payload(message.poll) if message.poll is not None else None,
         "reactions": message.reactions,
     }
 
@@ -798,6 +952,46 @@ def _attachment_from_payload(payload: Any) -> ChatAttachment | None:
         filename=filename,
         mime_type=mime_type,
         data_base64=data_base64,
+    )
+
+
+def _poll_payload(poll: ChatPoll) -> dict[str, Any]:
+    return {
+        "prompt": poll.prompt,
+        "options": poll.options,
+        "votes": poll.votes,
+        "voters": poll.voters,
+        "ended": poll.ended,
+    }
+
+
+def _poll_from_payload(payload: Any) -> ChatPoll | None:
+    if not isinstance(payload, dict):
+        return None
+
+    prompt = str(payload.get("prompt") or "").strip()
+    options = [
+        str(option).strip()
+        for option in list(payload.get("options") or [])
+        if str(option).strip()
+    ]
+    if not prompt or len(options) < 2:
+        return None
+
+    votes = {
+        str(option): int(count)
+        for option, count in dict(payload.get("votes") or {}).items()
+    }
+    voters = {
+        str(voter): int(option)
+        for voter, option in dict(payload.get("voters") or {}).items()
+    }
+    return ChatPoll(
+        prompt=prompt,
+        options=options,
+        votes=votes,
+        voters=voters,
+        ended=bool(payload.get("ended")),
     )
 
 

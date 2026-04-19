@@ -259,6 +259,58 @@ async def test_prepared_gif_attachment_round_trips() -> None:
 
 
 @pytest.mark.anyio
+async def test_poll_create_vote_and_end_round_trips() -> None:
+    host = RoomHostService(display_name="Host")
+    room = await host.start_room("Poll Room")
+
+    try:
+        local_invite = build_invite_link(
+            room_id=room.room_id,
+            room_name=room.room_name,
+            host="127.0.0.1",
+            port=room.port,
+        )
+        target = parse_join_target(local_invite)
+        host_client = RoomClient(display_name="Host")
+        viewer_client = RoomClient(display_name="Viewer")
+
+        poll_message = await host_client.send_poll(
+            target=target,
+            prompt="What should we watch next?",
+            options=["Comedy", "Action", "Horror"],
+        )
+        assert poll_message.poll is not None
+        assert poll_message.poll.options == ["Comedy", "Action", "Horror"]
+
+        voted_message = await viewer_client.vote_poll(
+            target=target,
+            message_id=poll_message.id,
+            option_index=1,
+        )
+        assert voted_message.poll is not None
+        assert voted_message.poll.votes == {"1": 1}
+        assert voted_message.poll.voters == {"Viewer": 1}
+
+        changed_vote_message = await viewer_client.vote_poll(
+            target=target,
+            message_id=poll_message.id,
+            option_index=2,
+        )
+        assert changed_vote_message.poll is not None
+        assert changed_vote_message.poll.votes == {"1": 0, "2": 1}
+        assert changed_vote_message.poll.voters == {"Viewer": 2}
+
+        ended_message = await host_client.end_poll(
+            target=target,
+            message_id=poll_message.id,
+        )
+        assert ended_message.poll is not None
+        assert ended_message.poll.ended is True
+    finally:
+        await host.stop()
+
+
+@pytest.mark.anyio
 async def test_movie_info_updates_for_room() -> None:
     host = RoomHostService(display_name="Host")
     room = await host.start_room("Movie Info Room")
