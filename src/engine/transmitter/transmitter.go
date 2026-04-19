@@ -197,6 +197,7 @@ func (s *Service) streamFrames(stream recording.ScreenStream) bool {
 	}
 	frameDuration := time.Second / time.Duration(frameRate)
 	frames := 0
+	encodeErrors := 0
 
 	for {
 		select {
@@ -219,6 +220,10 @@ func (s *Service) streamFrames(stream recording.ScreenStream) bool {
 			}
 			encoded, err := s.encoder.Encode(frame)
 			if err != nil {
+				if encodeErrors < 5 {
+					log.Printf("encode error: %v", err)
+				}
+				encodeErrors++
 				continue
 			}
 			if len(encoded.Data) == 0 {

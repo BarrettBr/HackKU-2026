@@ -16,6 +16,19 @@ cd /path/to/HackKU-2026
 make run
 ```
 
+## Local host + watcher test (same machine)
+
+```bash
+cd /path/to/HackKU-2026
+make dev-dual
+```
+
+This starts:
+- one engine runtime on `:8080`
+- two frontend windows (one can host, one can watch)
+
+Use the host window to create the room, then join from the other window with the invite code.
+
 ## Linux emoji support
 
 If reaction or avatar emojis show up as boxes on Linux, install a color emoji font:

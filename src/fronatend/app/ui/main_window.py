@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, QTimer, Qt, Signal
@@ -87,6 +88,9 @@ class MainWindow(QMainWindow):
         self._room_target: JoinTarget | None = None
         self._ipc_consumer: IPCVideoConsumer | None = None
         self._video_connect_task: asyncio.Task | None = None
+        self._video_recover_task: asyncio.Task | None = None
+        self._current_ipc_path: str = ""
+        self._last_video_frame_ts: float = 0.0
         self._last_message_id = 0
         self._author_colors: dict[str, str] = {}
         self._author_avatars: dict[str, str] = {}
@@ -354,7 +358,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(surface)
         layout.setContentsMargins(36, 36, 36, 36)
         layout.setSpacing(18)
-        layout.addStretch()
 
         live_stream = QLabel("LIVE STREAM")
         live_stream.setObjectName("streamEyebrow")
@@ -378,7 +381,6 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         layout.addWidget(self._video_frame_label, 1)
-        layout.addStretch()
         return surface
 
     def _build_bottom_bar(self) -> QFrame:
@@ -539,6 +541,8 @@ class MainWindow(QMainWindow):
 
         self._apply_room_info(room=room, is_host=False)
         self._room_target = target
+        self._show_room()
+
         if subscription is not None:
             self._start_video_consumer(subscription)
             if self._video_connect_task is not None:
@@ -557,7 +561,6 @@ class MainWindow(QMainWindow):
                 f"Joined chat. Video engine unavailable: {stream_error}",
                 5000,
             )
-        self._show_room()
 
     async def _ensure_video_consumer_ready(
         self,
@@ -568,8 +571,8 @@ class MainWindow(QMainWindow):
             self._start_video_consumer(subscription)
             return
 
-        for _ in range(80):  # ~20s max wait
-            await asyncio.sleep(0.25)
+        for attempt in range(120):  # ~16s max wait with faster initial polling
+            await asyncio.sleep(0.05 if attempt < 40 else 0.2)
             try:
                 latest = await self._engine_runtime.get_subscription(target)
             except Exception:
@@ -578,6 +581,18 @@ class MainWindow(QMainWindow):
             if latest.ipc_path and Path(latest.ipc_path).exists():
                 self._start_video_consumer(latest)
                 return
+
+    async def _recover_video_consumer(self) -> None:
+        try:
+            if self._room_target is None:
+                return
+            latest = await self._engine_runtime.get_subscription(self._room_target)
+            if latest.ipc_path:
+                self._start_video_consumer(latest)
+        except Exception:
+            pass
+        finally:
+            self._video_recover_task = None
 
     def _apply_room_info(self, room: RoomInfo, is_host: bool) -> None:
         self.state.room_id = room.room_id
@@ -1165,6 +1180,8 @@ class MainWindow(QMainWindow):
             consumer = IPCVideoConsumer(subscription.ipc_path)
             consumer.open()
             self._ipc_consumer = consumer
+            self._current_ipc_path = subscription.ipc_path
+            self._last_video_frame_ts = 0.0
             self._status_label.setText("Waiting for first video frame...")
             self._video_frame_timer.start()
         except Exception as error:
@@ -1174,10 +1191,15 @@ class MainWindow(QMainWindow):
         if self._video_connect_task is not None:
             self._video_connect_task.cancel()
             self._video_connect_task = None
+        if self._video_recover_task is not None:
+            self._video_recover_task.cancel()
+            self._video_recover_task = None
         self._video_frame_timer.stop()
         if self._ipc_consumer is not None:
             self._ipc_consumer.close()
             self._ipc_consumer = None
+        self._current_ipc_path = ""
+        self._last_video_frame_ts = 0.0
         if hasattr(self, "_video_frame_label"):
             self._video_frame_label.clear()
         if hasattr(self, "_status_label"):
@@ -1188,12 +1210,23 @@ class MainWindow(QMainWindow):
             return
         pixmap = self._ipc_consumer.read_latest_pixmap()
         if pixmap is None:
+            if (
+                self._room_target is not None
+                and self._video_recover_task is None
+                and self._last_video_frame_ts > 0.0
+                and (time.monotonic() - self._last_video_frame_ts) > 2.0
+            ):
+                self._status_label.setText("Recovering stream...")
+                self._video_recover_task = asyncio.create_task(
+                    self._recover_video_consumer()
+                )
             return
+        self._last_video_frame_ts = time.monotonic()
         self._status_label.setText("")
         self._video_frame_label.setPixmap(
             pixmap.scaled(
                 self._video_frame_label.size(),
-                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
         )

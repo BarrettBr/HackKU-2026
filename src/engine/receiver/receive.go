@@ -50,6 +50,7 @@ type Service struct {
 	sink   FrameSink
 
 	packetCount  atomic.Uint64
+	droppedCount atomic.Uint64
 	sampleCount  atomic.Uint64
 	decodedCount atomic.Uint64
 	writtenCount atomic.Uint64
@@ -108,38 +109,53 @@ func (s *Service) Run() error {
 			return err
 		}
 
-		encoded, ready, err := s.depacketize(pkt)
-		if err != nil {
-			return err
-		}
-		if !ready {
-			continue
-		}
-		if err := s.ensureDecoder(encoded); err != nil {
-			s.decodeErrors.Add(1)
-			continue
-		}
-		if s.decoder == nil {
-			// Need stream parameters (SPS) before decode can start.
+		if pkt.Packet == nil {
 			continue
 		}
 
-		decoded, err := s.decodeFrame(encoded)
-		if err != nil {
-			if errors.Is(err, ErrNoFrameReady) {
+		s.sampleBuilder.Push(pkt.Packet)
+		for {
+			sample := s.sampleBuilder.Pop()
+			if sample == nil {
+				break
+			}
+			s.sampleCount.Add(1)
+
+			frames, err := s.depacketizeSample(sample.Data)
+			if err != nil {
+				return err
+			}
+			if len(frames) == 0 {
 				continue
 			}
-			s.decodeErrors.Add(1)
-			// Drop bad samples and keep the receiver alive.
-			continue
-		}
-		s.decodedCount.Add(1)
+			for _, encoded := range frames {
+				if err := s.ensureDecoder(encoded); err != nil {
+					s.decodeErrors.Add(1)
+					continue
+				}
+				if s.decoder == nil {
+					// Need stream parameters (SPS) before decode can start.
+					continue
+				}
 
-		if err := s.writeFrame(decoded); err != nil {
-			// Sink failures should not tear down the receive loop.
-			continue
+				decoded, err := s.decodeFrame(encoded)
+				if err != nil {
+					if errors.Is(err, ErrNoFrameReady) {
+						continue
+					}
+					s.decodeErrors.Add(1)
+					// Drop bad samples and keep the receiver alive.
+					continue
+				}
+				s.decodedCount.Add(1)
+
+				if err := s.writeFrame(decoded); err != nil {
+					// Sink failures should not tear down the receive loop.
+					continue
+				}
+				s.writtenCount.Add(1)
+			}
 		}
-		s.writtenCount.Add(1)
 	}
 }
 
@@ -166,37 +182,38 @@ func (s *Service) receivePacket() (RTPPacket, error) {
 	}
 }
 
-func (s *Service) depacketize(pkt RTPPacket) (EncodedFrame, bool, error) {
-	if pkt.Packet == nil {
-		return EncodedFrame{}, false, fmt.Errorf("nil RTP packet")
+func (s *Service) depacketizeSample(sampleData []byte) ([]EncodedFrame, error) {
+	if len(sampleData) == 0 {
+		return nil, nil
 	}
 
-	s.sampleBuilder.Push(pkt.Packet)
-	sample := s.sampleBuilder.Pop()
-	if sample == nil {
-		return EncodedFrame{}, false, nil
-	}
-	s.sampleCount.Add(1)
-
-	payload := sample.Data
+	payload := sampleData
 	if s.codec == "" || s.codec == "h264" {
-		ready := false
 		payload = normalizeH264Bytestream(payload)
 		if w, h, ok := s.detectStreamDimensions(payload); ok {
 			s.streamWidth = w
 			s.streamHeight = h
 		}
 		payload = s.ensureH264ParameterSets(payload)
-		payload, ready = s.assembleH264AccessUnit(payload)
-		if !ready {
-			return EncodedFrame{}, false, nil
+		accessUnits := s.assembleH264AccessUnits(payload)
+		if len(accessUnits) == 0 {
+			return nil, nil
 		}
-		if s.debugDump != nil {
-			_, _ = s.debugDump.Write(payload)
+
+		frames := make([]EncodedFrame, 0, len(accessUnits))
+		for _, au := range accessUnits {
+			if len(au) == 0 {
+				continue
+			}
+			if s.debugDump != nil {
+				_, _ = s.debugDump.Write(au)
+			}
+			frames = append(frames, EncodedFrame{Payload: au})
 		}
+		return frames, nil
 	}
 
-	return EncodedFrame{Payload: payload}, true, nil
+	return []EncodedFrame{{Payload: payload}}, nil
 }
 
 func (s *Service) decodeFrame(frame EncodedFrame) (DecodedFrame, error) {
@@ -273,21 +290,22 @@ func (s *Service) detectStreamDimensions(payload []byte) (int, int, bool) {
 	return 0, 0, false
 }
 
-func (s *Service) assembleH264AccessUnit(payload []byte) ([]byte, bool) {
+func (s *Service) assembleH264AccessUnits(payload []byte) [][]byte {
 	nals := splitAnnexBNALs(payload)
 	if len(nals) == 0 {
-		return nil, false
+		return nil
 	}
 
-	flush := func() ([]byte, bool) {
+	accessUnits := make([][]byte, 0, 2)
+	flush := func() {
 		if len(s.pendingAU) == 0 {
-			return nil, false
+			return
 		}
 		out := make([]byte, len(s.pendingAU))
 		copy(out, s.pendingAU)
 		s.pendingAU = s.pendingAU[:0]
 		s.pendingHasVCL = false
-		return out, true
+		accessUnits = append(accessUnits, out)
 	}
 	appendNAL := func(nal []byte) {
 		s.pendingAU = append(s.pendingAU, 0x00, 0x00, 0x00, 0x01)
@@ -299,30 +317,31 @@ func (s *Service) assembleH264AccessUnit(payload []byte) ([]byte, bool) {
 			continue
 		}
 		nalType := nal[0] & 0x1F
-		if nalType == 9 && s.pendingHasVCL {
-			au, ok := flush()
+		isVCL := nalType >= 1 && nalType <= 5
+		isDelimiterLike := nalType == 6 || nalType == 7 || nalType == 8 || nalType == 9
+		if isDelimiterLike && s.pendingHasVCL {
+			flush()
 			appendNAL(nal)
-			if ok {
-				return au, true
-			}
 			continue
 		}
-		isVCL := nalType >= 1 && nalType <= 5
 		if isVCL {
 			firstMB, ok := parseFirstMBSlice(nal)
-			if s.pendingHasVCL && ok && firstMB == 0 {
-				au, ok := flush()
+			if s.pendingHasVCL && ((ok && firstMB == 0) || !ok) {
+				flush()
 				appendNAL(nal)
 				s.pendingHasVCL = true
-				if ok {
-					return au, true
-				}
+				continue
 			}
 			s.pendingHasVCL = true
 		}
 		appendNAL(nal)
 	}
-	return nil, false
+	// Samples coming from SampleBuilder are typically complete access units.
+	// Flush trailing VCL so we don't wait extra cycles for another boundary.
+	if s.pendingHasVCL {
+		flush()
+	}
+	return accessUnits
 }
 
 func parseFirstMBSlice(nal []byte) (int, bool) {
@@ -428,6 +447,17 @@ func (s *Service) readTrackLoop(track *webrtc.TrackRemote, generation uint64) {
 		case <-s.stopCh:
 			return
 		case s.inboundCh <- inboundPacket{packet: packet}:
+		default:
+			s.droppedCount.Add(1)
+			// Drop one oldest packet to keep the stream live under backpressure.
+			select {
+			case <-s.inboundCh:
+			default:
+			}
+			select {
+			case s.inboundCh <- inboundPacket{packet: packet}:
+			default:
+			}
 		}
 	}
 }
@@ -440,10 +470,21 @@ func (s *Service) requestKeyframes(pc *webrtc.PeerConnection, track *webrtc.Trac
 	sendPLI := func() {
 		_ = pc.WriteRTCP([]rtcp.Packet{
 			&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},
+			&rtcp.FullIntraRequest{MediaSSRC: uint32(track.SSRC())},
 		})
 	}
 
 	sendPLI()
+	// Burst PLIs on startup to get the first decodable keyframe quickly.
+	for i := 0; i < 6; i++ {
+		select {
+		case <-s.stopCh:
+			return
+		case <-time.After(500 * time.Millisecond):
+			sendPLI()
+		}
+	}
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -458,6 +499,7 @@ func (s *Service) requestKeyframes(pc *webrtc.PeerConnection, track *webrtc.Trac
 
 type Stats struct {
 	Packets      uint64 `json:"packets"`
+	Dropped      uint64 `json:"dropped"`
 	Samples      uint64 `json:"samples"`
 	Decoded      uint64 `json:"decoded"`
 	Written      uint64 `json:"written"`
@@ -467,6 +509,7 @@ type Stats struct {
 func (s *Service) Stats() Stats {
 	return Stats{
 		Packets:      s.packetCount.Load(),
+		Dropped:      s.droppedCount.Load(),
 		Samples:      s.sampleCount.Load(),
 		Decoded:      s.decodedCount.Load(),
 		Written:      s.writtenCount.Load(),

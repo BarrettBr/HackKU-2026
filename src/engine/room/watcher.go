@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/BarrettBr/HackKU-2026/config"
 	"github.com/pion/ice/v4"
@@ -82,6 +83,7 @@ func JoinWatcher(ctx context.Context, cfg *config.Config, runtime WatcherRuntime
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-gatherComplete:
+	case <-time.After(400 * time.Millisecond):
 	}
 
 	if pc.LocalDescription() == nil {

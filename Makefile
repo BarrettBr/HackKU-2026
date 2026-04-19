@@ -1,4 +1,4 @@
-.PHONY: deps env run frontend backend dev stop-backend check format typecheck test clean
+.PHONY: deps env run frontend frontend2 backend dev dev-dual stop-backend check format typecheck test clean
 
 PYTHON ?= python3
 VENV_DIR ?= .venv
@@ -26,6 +26,9 @@ deps: $(DEPS_STAMP)
 env: $(ENV_FILE)
 
 frontend: deps env
+	PYTHONPATH=src/fronatend $(VENV_PYTHON) src/fronatend/app/main.py
+
+frontend2: deps env
 	PYTHONPATH=src/fronatend $(VENV_PYTHON) src/fronatend/app/main.py
 
 run: frontend
@@ -56,6 +59,43 @@ dev: deps env
 		echo "Backend exited during startup."; \
 		exit 1; \
 	fi; \
+	PYTHONPATH=src/fronatend $(VENV_PYTHON) src/fronatend/app/main.py
+
+dev-dual: deps env
+	@set -eu; \
+	echo "Starting dual-client dev stack (ENGINE_GO_TAGS='$(ENGINE_GO_TAGS)')"; \
+	if ss -ltn '( sport = :8080 )' | grep -q ':8080'; then \
+		echo "Port 8080 is already in use. Run 'make stop-backend' first."; \
+		exit 1; \
+	fi; \
+	BACKEND_PID=""; \
+	WATCHER_PID=""; \
+	cleanup() { \
+		if [ -n "$$WATCHER_PID" ] && kill -0 "$$WATCHER_PID" 2>/dev/null; then \
+			kill -TERM "$$WATCHER_PID" 2>/dev/null || true; \
+			wait "$$WATCHER_PID" 2>/dev/null || true; \
+		fi; \
+		if [ -n "$$BACKEND_PID" ] && kill -0 "$$BACKEND_PID" 2>/dev/null; then \
+			kill -TERM -- "-$$BACKEND_PID" 2>/dev/null || kill -TERM "$$BACKEND_PID" 2>/dev/null || true; \
+			wait "$$BACKEND_PID" 2>/dev/null || true; \
+		fi; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	setsid sh -c "cd $(ENGINE_DIR) && exec go run $(if $(ENGINE_GO_TAGS),-tags $(ENGINE_GO_TAGS),) ." & \
+	BACKEND_PID=$$!; \
+	sleep 1; \
+	if ! kill -0 "$$BACKEND_PID" 2>/dev/null; then \
+		echo "Backend exited during startup."; \
+		exit 1; \
+	fi; \
+	PYTHONPATH=src/fronatend $(VENV_PYTHON) src/fronatend/app/main.py & \
+	WATCHER_PID=$$!; \
+	echo ""; \
+	echo "Dual test ready:"; \
+	echo "  1) Host window: create room + start screen share"; \
+	echo "  2) Watcher window: join with ROOM@host:port from host invite"; \
+	echo "  3) Close host window (foreground) to stop all launched processes"; \
+	echo ""; \
 	PYTHONPATH=src/fronatend $(VENV_PYTHON) src/fronatend/app/main.py
 
 stop-backend:

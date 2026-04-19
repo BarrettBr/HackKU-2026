@@ -109,6 +109,9 @@ class IPCVideoConsumer:
     def _to_pixmap(self, data: bytes, header: IPCHeader) -> QPixmap | None:
         if header.pixel_format == "rgb24":
             bytes_per_line = header.width * 3
+            expected = bytes_per_line * header.height
+            if len(data) < expected:
+                return None
             image = QImage(
                 data,
                 header.width,
@@ -120,6 +123,9 @@ class IPCVideoConsumer:
 
         if header.pixel_format == "rgba":
             bytes_per_line = header.width * 4
+            expected = bytes_per_line * header.height
+            if len(data) < expected:
+                return None
             image = QImage(
                 data,
                 header.width,
@@ -132,6 +138,9 @@ class IPCVideoConsumer:
         if header.pixel_format == "yuv420p" and hasattr(
             QImage.Format, "Format_YUV420P"
         ):
+            expected = (header.width * header.height * 3) // 2
+            if len(data) < expected:
+                return None
             image = QImage(
                 data, header.width, header.height, QImage.Format.Format_YUV420P
             )

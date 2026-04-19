@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -42,7 +41,6 @@ type ffmpegEncoder struct {
 	cfg    *config.Transmitter
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
-	stdinF *os.File
 	stdout io.ReadCloser
 
 	accessUnits chan []byte
@@ -79,21 +77,29 @@ func (e *ffmpegEncoder) start() error {
 		return fmt.Errorf("ffmpeg encode requires positive input dimensions")
 	}
 
+	encoderName := pickH264Encoder()
+	fps := maxInt(e.cfg.FrameRate, 1)
+
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
 		"-f", "rawvideo",
 		"-pixel_format", e.cfg.PixelFormat,
 		"-video_size", fmt.Sprintf("%dx%d", e.inWidth, e.inHeight),
-		"-framerate", fmt.Sprintf("%d", maxInt(e.cfg.FrameRate, 1)),
+		"-framerate", fmt.Sprintf("%d", fps),
 		"-i", "pipe:0",
 		"-an",
-		"-c:v", pickH264Encoder(),
+		"-c:v", encoderName,
 		"-preset", e.cfg.FfmpegQuality,
 		"-tune", "zerolatency",
-		"-g", fmt.Sprintf("%d", maxInt(e.cfg.FrameRate, 1)),
-		"-keyint_min", fmt.Sprintf("%d", maxInt(e.cfg.FrameRate, 1)),
+		"-g", fmt.Sprintf("%d", fps),
+		"-keyint_min", fmt.Sprintf("%d", fps),
 		"-sc_threshold", "0",
+		"-force_key_frames", "expr:gte(t,n_forced*1)",
+	}
+	if encoderName == "libx264" {
+		// Ensure clear frame boundaries (AUD) and parameter-set repeats at keyframes.
+		args = append(args, "-x264-params", fmt.Sprintf("aud=1:repeat-headers=1:keyint=%d:min-keyint=%d:scenecut=0", fps, fps))
 	}
 	if e.cfg.PixelWidth > 0 && e.cfg.PixelHeight > 0 {
 		args = append(args,
@@ -106,6 +112,8 @@ func (e *ffmpegEncoder) start() error {
 			),
 		)
 	}
+	// Normalize AU boundaries for downstream depacketize/decode stability.
+	args = append(args, "-bsf:v", "h264_metadata=aud=insert")
 	args = append(args, "-pix_fmt", "yuv420p", "-f", "h264", "pipe:1")
 
 	e.cmd = exec.Command("ffmpeg", args...)
@@ -123,9 +131,6 @@ func (e *ffmpegEncoder) start() error {
 	}
 
 	e.stdin = stdin
-	if file, ok := stdin.(*os.File); ok {
-		e.stdinF = file
-	}
 	e.stdout = stdout
 	e.started = true
 
@@ -164,23 +169,8 @@ func (e *ffmpegEncoder) Encode(frame recording.Frame) (EncodedFrame, error) {
 		payload = payload[:e.frameSize]
 	}
 
-	if e.stdinF != nil {
-		_ = e.stdinF.SetWriteDeadline(time.Now().Add(40 * time.Millisecond))
-	}
 	_, err := e.stdin.Write(payload)
-	if e.stdinF != nil {
-		_ = e.stdinF.SetWriteDeadline(time.Time{})
-	}
 	if err != nil {
-		var pathErr *os.PathError
-		if errors.As(err, &pathErr) && errors.Is(pathErr.Err, os.ErrDeadlineExceeded) {
-			e.mu.Unlock()
-			return EncodedFrame{}, nil
-		}
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			e.mu.Unlock()
-			return EncodedFrame{}, nil
-		}
 		e.mu.Unlock()
 		return EncodedFrame{}, err
 	}
@@ -239,12 +229,39 @@ func (e *ffmpegEncoder) readAccessUnits() {
 		select {
 		case e.accessUnits <- out:
 		default:
+			// Drop one oldest complete AU instead of dropping random NAL units.
+			select {
+			case <-e.accessUnits:
+			default:
+			}
+			select {
+			case e.accessUnits <- out:
+			default:
+			}
 		}
 	}
+
+	flush := func(pending *[]byte) {
+		if len(*pending) == 0 {
+			return
+		}
+		writeAU(*pending)
+		*pending = (*pending)[:0]
+	}
+
+	var pending []byte
+	pendingHasVCL := false
+	appendNAL := func(nal []byte) {
+		pending = append(pending, 0x00, 0x00, 0x00, 0x01)
+		pending = append(pending, nal...)
+	}
+
 	for {
 		nal, err := reader.NextNAL()
 		if err != nil {
+			flush(&pending)
 			if err == io.EOF {
+				err = nil
 			}
 			select {
 			case e.readErrCh <- err:
@@ -255,11 +272,84 @@ func (e *ffmpegEncoder) readAccessUnits() {
 		if nal == nil || len(nal.Data) == 0 {
 			continue
 		}
-		out := make([]byte, 4+len(nal.Data))
-		copy(out[:4], []byte{0x00, 0x00, 0x00, 0x01})
-		copy(out[4:], nal.Data)
-		writeAU(out)
+
+		nalType := nal.Data[0] & 0x1F
+		isVCL := nalType >= 1 && nalType <= 5
+		isDelimiterLike := nalType == 6 || nalType == 7 || nalType == 8 || nalType == 9
+		if isDelimiterLike && pendingHasVCL {
+			flush(&pending)
+			pendingHasVCL = false
+		}
+
+		if isVCL {
+			firstMB, ok := parseFirstMBSliceFromNAL(nal.Data)
+			if pendingHasVCL && ((ok && firstMB == 0) || !ok) {
+				flush(&pending)
+				pendingHasVCL = false
+			}
+			pendingHasVCL = true
+		}
+
+		appendNAL(nal.Data)
 	}
+}
+
+func parseFirstMBSliceFromNAL(nal []byte) (int, bool) {
+	if len(nal) < 2 {
+		return 0, false
+	}
+
+	// Remove NAL header and emulation-prevention bytes.
+	rbsp := make([]byte, 0, len(nal)-1)
+	for i := 1; i < len(nal); i++ {
+		if i+2 < len(nal) && nal[i] == 0x00 && nal[i+1] == 0x00 && nal[i+2] == 0x03 {
+			rbsp = append(rbsp, 0x00, 0x00)
+			i += 2
+			continue
+		}
+		rbsp = append(rbsp, nal[i])
+	}
+
+	return readUE(rbsp)
+}
+
+func readUE(rbsp []byte) (int, bool) {
+	bitPos := 0
+	readBit := func() (int, bool) {
+		if bitPos >= len(rbsp)*8 {
+			return 0, false
+		}
+		byteIndex := bitPos / 8
+		bitIndex := 7 - (bitPos % 8)
+		v := int((rbsp[byteIndex] >> bitIndex) & 0x01)
+		bitPos++
+		return v, true
+	}
+
+	zeros := 0
+	for {
+		bit, ok := readBit()
+		if !ok {
+			return 0, false
+		}
+		if bit == 1 {
+			break
+		}
+		zeros++
+		if zeros > 31 {
+			return 0, false
+		}
+	}
+
+	codeNum := 1
+	for i := 0; i < zeros; i++ {
+		bit, ok := readBit()
+		if !ok {
+			return 0, false
+		}
+		codeNum = (codeNum << 1) | bit
+	}
+	return codeNum - 1, true
 }
 
 func rawFrameSize(pixelFormat string, width, height int) (int, error) {

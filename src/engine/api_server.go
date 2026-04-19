@@ -36,6 +36,7 @@ type subscriptionStatus struct {
 	PixelFormat  string `json:"pixel_format,omitempty"`
 	LastError    string `json:"last_error,omitempty"`
 	Packets      uint64 `json:"packets"`
+	Dropped      uint64 `json:"dropped"`
 	Samples      uint64 `json:"samples"`
 	Decoded      uint64 `json:"decoded"`
 	Written      uint64 `json:"written"`
@@ -176,10 +177,13 @@ func (w *watcherController) subscribe(req subscribeRequest) (subscriptionStatus,
 		_ = w.sink.Close()
 		w.sink = nil
 	}
+	w.mu.Unlock()
+
 	if err := w.runtime.SetReceiverFrameSink(sink); err != nil {
 		return subscriptionStatus{}, err
 	}
 
+	w.mu.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
 	sessionID := w.sessionSeq.Add(1)
 	w.cancel = cancel
@@ -244,6 +248,7 @@ func (w *watcherController) getStatus() subscriptionStatus {
 	status := w.status
 	if stats, err := w.runtime.ReceiverStats(); err == nil {
 		status.Packets = stats.Packets
+		status.Dropped = stats.Dropped
 		status.Samples = stats.Samples
 		status.Decoded = stats.Decoded
 		status.Written = stats.Written

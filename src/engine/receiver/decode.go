@@ -46,6 +46,7 @@ type ffmpegDecoder struct {
 
 	cmd        *exec.Cmd
 	stdin      io.WriteCloser
+	stdinFile  *os.File
 	stdout     io.ReadCloser
 	stdoutFile *os.File
 	rawBuffer  []byte
@@ -112,6 +113,9 @@ func (d *ffmpegDecoder) start() error {
 	}
 
 	d.stdin = stdin
+	if file, ok := stdin.(*os.File); ok {
+		d.stdinFile = file
+	}
 	d.stdout = stdout
 	if file, ok := stdout.(*os.File); ok {
 		d.stdoutFile = file
@@ -123,7 +127,21 @@ func (d *ffmpegDecoder) Decode(frame EncodedFrame) (DecodedFrame, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if _, err := d.stdin.Write(frame.Payload); err != nil {
+	if d.stdinFile != nil {
+		_ = d.stdinFile.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+	}
+	_, err := d.stdin.Write(frame.Payload)
+	if d.stdinFile != nil {
+		_ = d.stdinFile.SetWriteDeadline(time.Time{})
+	}
+	if err != nil {
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) && errors.Is(pathErr.Err, os.ErrDeadlineExceeded) {
+			return DecodedFrame{}, ErrNoFrameReady
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return DecodedFrame{}, ErrNoFrameReady
+		}
 		return DecodedFrame{}, err
 	}
 
